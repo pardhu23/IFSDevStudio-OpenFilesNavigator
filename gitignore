@@ -1,0 +1,46 @@
+# ── Build output ──────────────────────────────────────────────────────────
+
+# Ignore everything inside build/
+build/*
+
+# Keep build/public-package-jars/ — these are the distilled platform JARs
+# that CI needs to compile without a local IFS DS18 installation.
+# They are generated once by `ant build` and committed.
+!build/public-package-jars/
+!build/public-package-jars/**
+
+# Additional generated build folders/files
+build/classes/
+build/classes-generated/
+build/cluster/
+build/depcache/
+build/test/
+build/no-license.txt
+
+# The NBM (installable plugin) goes here — distributed via GitHub Releases
+dist/
+
+# ── NetBeans generated project files ──────────────────────────────────────
+nbproject/build-impl.xml
+nbproject/genfiles.properties
+
+# ── Machine-specific settings ──────────────────────────────────────────────
+# platform-private.properties contains the absolute path to the developer's
+# local IFS Developer Studio 18 installation. Never commit this.
+nbproject/private/
+
+# ── Manual backup zip at project root ─────────────────────────────────────
+src.zip
+*.zip
+
+# ── OS artefacts ──────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Editor artefacts ──────────────────────────────────────────────────────
+*.swp
+*.swo
+*~
+.idea/
+*.iml
