@@ -1,15 +1,10 @@
 # ── Build output ──────────────────────────────────────────────────────────
 
-# Ignore everything inside build/
-build/*
-
-# Keep build/public-package-jars/ — these are the distilled platform JARs
-# that CI needs to compile without a local IFS DS18 installation.
-# They are generated once by `ant build` and committed.
+build/
 !build/public-package-jars/
 !build/public-package-jars/**
 
-# Additional generated build folders/files
+# Ignore generated build content
 build/classes/
 build/classes-generated/
 build/cluster/
@@ -25,8 +20,6 @@ nbproject/build-impl.xml
 nbproject/genfiles.properties
 
 # ── Machine-specific settings ──────────────────────────────────────────────
-# platform-private.properties contains the absolute path to the developer's
-# local IFS Developer Studio 18 installation. Never commit this.
 nbproject/private/
 
 # ── Manual backup zip at project root ─────────────────────────────────────
