@@ -66,8 +66,9 @@ public final class PluginPrefs {
 
     public static final String VIEW_LIST    = "LIST";
     public static final String VIEW_TREE    = "TREE";
-    public static final String NOTE_TOOLTIP = "TOOLTIP";
-    public static final String NOTE_INLINE  = "INLINE";
+    public static final String NOTE_TOOLTIP  = "TOOLTIP";
+    public static final String NOTE_INLINE   = "INLINE";
+    public static final String NOTE_SUBTITLE = "SUBTITLE";
 
     /** Build files shown inline in their natural folder (greyed/italic). */
     public static final String BUILD_INLINE  = "INLINE";

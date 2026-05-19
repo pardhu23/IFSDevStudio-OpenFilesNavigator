@@ -8,242 +8,298 @@ import org.openide.windows.TopComponent;
 /**
  * Cell renderer for the flat list view.
  *
- * <p>The list model contains two kinds of items:
+ * <p>
+ * The list model contains two kinds of items:
  * <ul>
- *   <li>{@link TopComponent} — rendered as a file row with a × close button
- *       on the <em>left</em> edge, then the file icon, then the name and
- *       pin/note indicators.</li>
- *   <li>{@link GroupHeader} — rendered as a bold section-header row with a
- *       ▶/▼ collapse arrow, group name, and file count.</li>
+ * <li>{@link TopComponent} — rendered as a file row with a × close button
+ * on the <em>left</em> edge, then the file icon, then the name and
+ * pin/note indicators.</li>
+ * <li>{@link GroupHeader} — rendered as a bold section-header row with a
+ * ▶/▼ collapse arrow, group name, and file count.</li>
  * </ul>
  *
  * <h3>Build files</h3>
  * Files whose tooltip path contains {@code /build/} are rendered in
  * <em>italic</em> with a muted slate-blue foreground to signal they are
- * auto-generated and read-only.  They remain clickable.
+ * auto-generated and read-only. They remain clickable.
  */
 public class OpenFilesCellRenderer extends DefaultListCellRenderer {
 
-    // ── Colours ───────────────────────────────────────────────────────────
-    static final Color ACTIVE_BG       = new Color(0, 120, 215, 40);
-    static final Color MODIFIED_COLOR  = new Color(220, 120, 0);
-    static final Color CLOSE_BTN_COLOR = new Color(160, 50, 50);
-    static final Color CLOSE_HOVER_BG  = new Color(220, 60, 60, 50);
+   // ── Colours ───────────────────────────────────────────────────────────
+   static final Color ACTIVE_BG = new Color(0, 120, 215, 40);
+   static final Color MODIFIED_COLOR = new Color(220, 120, 0);
+   static final Color CLOSE_BTN_COLOR = new Color(160, 50, 50);
+   static final Color CLOSE_HOVER_BG = new Color(220, 60, 60, 50);
 
-    /**
-     * Muted slate-blue used for auto-generated build files.
-     * Distinct from disabled-grey so it reads as "different" not "broken".
-     */
-    static final Color BUILD_FILE_COLOR = new Color(120, 140, 170);
+   /**
+    * Muted slate-blue used for auto-generated build files.
+    * Distinct from disabled-grey so it reads as "different" not "broken".
+    */
+   static final Color BUILD_FILE_COLOR = new Color(120, 140, 170);
 
-    /** Pixels reserved on the left of every file row for the × button. */
-    static final int CLOSE_BTN_WIDTH = 20;
+   /**
+    * Pixels reserved on the left of every file row for the × button.
+    */
+   static final int CLOSE_BTN_WIDTH = 20;
 
-    // ── Hover state (written by MouseMotionListener in the TC) ─────────────
-    int hoveredRow = -1;
+   // ── Hover state (written by MouseMotionListener in the TC) ─────────────
+   int hoveredRow = -1;
 
-    // ── Per-cell state set during getListCellRendererComponent ─────────────
-    private Color tagStripeColor = null;
-    private boolean isHovered    = false;
+   // ── Per-cell state set during getListCellRendererComponent ─────────────
+   private Color tagStripeColor = null;
+   private boolean isHovered = false;
+   private String subtitleNote = null; // non-null when NOTE_SUBTITLE and note exists
 
-    // ── GroupHeader sentinel ───────────────────────────────────────────────
+   // ── GroupHeader sentinel ───────────────────────────────────────────────
+   /**
+    * Sentinel object placed into the list model to represent a collapsible
+    * section header (Pinned, a user group, Ungrouped, or Generated).
+    */
+   static final class GroupHeader {
 
-    /**
-     * Sentinel object placed into the list model to represent a collapsible
-     * section header (Pinned, a user group, Ungrouped, or Generated).
-     */
-    static final class GroupHeader {
-        final String name;
-        int fileCount;
+      final String name;
+      int fileCount;
 
-        GroupHeader(String name, int fileCount) {
-            this.name      = name;
-            this.fileCount = fileCount;
-        }
+      GroupHeader(String name, int fileCount) {
+         this.name = name;
+         this.fileCount = fileCount;
+      }
 
-        @Override public String toString() { return name; }
-    }
+      @Override
+      public String toString() {
+         return name;
+      }
+   }
 
-    // ── Renderer ──────────────────────────────────────────────────────────
+   // ── Renderer ──────────────────────────────────────────────────────────
+   @Override
+   public Component getListCellRendererComponent(
+           JList<?> list, Object value, int index,
+           boolean isSelected, boolean cellHasFocus) {
 
-    @Override
-    public Component getListCellRendererComponent(
-            JList<?> list, Object value, int index,
-            boolean isSelected, boolean cellHasFocus) {
+      if (value instanceof GroupHeader) {
+         return renderHeader(list, (GroupHeader) value, index, isSelected);
+      }
+      return renderFile(list, value, index, isSelected);
+   }
 
-        if (value instanceof GroupHeader) {
-            return renderHeader(list, (GroupHeader) value, index, isSelected);
-        }
-        return renderFile(list, value, index, isSelected);
-    }
+   // ── Header row ────────────────────────────────────────────────────────
+   private Component renderHeader(JList<?> list, GroupHeader header,
+           int index, boolean isSelected) {
+      tagStripeColor = null; // headers never have a tag stripe
+      isHovered = false;
 
-    // ── Header row ────────────────────────────────────────────────────────
+      JPanel panel = new JPanel(new BorderLayout());
+      panel.setBorder(new EmptyBorder(3, 6, 3, 6));
 
-    private Component renderHeader(JList<?> list, GroupHeader header,
-            int index, boolean isSelected) {
-        tagStripeColor = null; // headers never have a tag stripe
-        isHovered      = false;
+      Color baseBg = UIManager.getColor("Panel.background");
+      if (baseBg == null) {
+         baseBg = new Color(240, 240, 240);
+      }
+      panel.setBackground(isSelected
+              ? UIManager.getColor("List.selectionBackground")
+              : blend(baseBg, new Color(128, 128, 128), 0.08f));
+      panel.setOpaque(true);
 
-        JPanel panel = new JPanel(new BorderLayout());
-        panel.setBorder(new EmptyBorder(3, 6, 3, 6));
+      boolean collapsed = PluginPrefs.isGroupCollapsed(header.name);
+      String arrow = collapsed ? "\u25B6 " : "\u25BC "; // ▶ or ▼
 
-        Color baseBg = UIManager.getColor("Panel.background");
-        if (baseBg == null) baseBg = new Color(240, 240, 240);
-        panel.setBackground(isSelected
-                ? UIManager.getColor("List.selectionBackground")
-                : blend(baseBg, new Color(128, 128, 128), 0.08f));
-        panel.setOpaque(true);
+      // Special label for Generated section
+      String displayName = header.name;
 
-        boolean collapsed = PluginPrefs.isGroupCollapsed(header.name);
-        String arrow = collapsed ? "\u25B6 " : "\u25BC "; // ▶ or ▼
+      JLabel label = new JLabel(arrow + displayName + "  (" + header.fileCount + ")");
+      label.setFont(label.getFont().deriveFont(Font.BOLD, 11f));
+      label.setForeground(isSelected
+              ? UIManager.getColor("List.selectionForeground")
+              : UIManager.getColor("Label.foreground"));
 
-        // Special label for Generated section
-        String displayName = header.name;
+      // Tint the Generated header label slightly to match file colour
+      if (!isSelected && PluginPrefs.SECTION_GENERATED.equals(header.name)) {
+         label.setForeground(BUILD_FILE_COLOR.darker());
+      }
 
-        JLabel label = new JLabel(arrow + displayName + "  (" + header.fileCount + ")");
-        label.setFont(label.getFont().deriveFont(Font.BOLD, 11f));
-        label.setForeground(isSelected
-                ? UIManager.getColor("List.selectionForeground")
-                : UIManager.getColor("Label.foreground"));
+      panel.add(label, BorderLayout.CENTER);
+      panel.setPreferredSize(new Dimension(panel.getPreferredSize().width, 24));
+      panel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 24));
+      return panel;
+   }
 
-        // Tint the Generated header label slightly to match file colour
-        if (!isSelected && PluginPrefs.SECTION_GENERATED.equals(header.name)) {
-            label.setForeground(BUILD_FILE_COLOR.darker());
-        }
+   // ── File row ──────────────────────────────────────────────────────────
+   private Component renderFile(JList<?> list, Object value, int index,
+           boolean isSelected) {
 
-        panel.add(label, BorderLayout.CENTER);
-        panel.setPreferredSize(new Dimension(panel.getPreferredSize().width, 24));
-        panel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 24));
-        return panel;
-    }
+      super.getListCellRendererComponent(list, value, index, isSelected, false);
 
-    // ── File row ──────────────────────────────────────────────────────────
+      if (!(value instanceof TopComponent)) {
+         return this;
+      }
+      TopComponent tc = (TopComponent) value;
 
-    private Component renderFile(JList<?> list, Object value, int index,
-            boolean isSelected) {
+      boolean isBuild = PluginPrefs.isBuildFile(tc);
+      String name = OpenFilesTopComponent.resolveDisplayNameStatic(tc);
+      if (name == null) {
+         name = "(unnamed)";
+      }
 
-        super.getListCellRendererComponent(list, value, index, isSelected, false);
+      String tcKey = PluginPrefs.keyFor(tc);
+      String note = PluginPrefs.getNote(tcKey);
+      boolean hasNote = note != null && !note.trim().isEmpty();
+      boolean pinned = PluginPrefs.isPinned(tcKey);
+      String noteDisplay = PluginPrefs.getNoteDisplay();
+      boolean inline = PluginPrefs.NOTE_INLINE.equals(noteDisplay);
+      boolean subtitle = PluginPrefs.NOTE_SUBTITLE.equals(noteDisplay);
 
-        if (!(value instanceof TopComponent)) return this;
-        TopComponent tc = (TopComponent) value;
+      // Resolve tag stripe colour for paintComponent.
+      PluginPrefs.TagColor tag = PluginPrefs.getTag(tcKey);
+      tagStripeColor = (tag != PluginPrefs.TagColor.NONE) ? tag.color : null;
+      isHovered = (index == hoveredRow);
+      subtitleNote = (hasNote && subtitle) ? note : null;
 
-        boolean isBuild = PluginPrefs.isBuildFile(tc);
-        String name = OpenFilesTopComponent.resolveDisplayNameStatic(tc);
-        if (name == null) name = "(unnamed)";
+      StringBuilder display = new StringBuilder();
+      if (pinned) {
+         display.append("\uD83D\uDCCC "); // 📌
+      }
+      display.append(name);
+      if (hasNote && inline) {
+         display.append("  \u270E");       // ✎
+      }
+      setText(display.toString());
 
-        String  tcKey   = PluginPrefs.keyFor(tc);
-        String  note    = PluginPrefs.getNote(tcKey);
-        boolean hasNote = note != null && !note.trim().isEmpty();
-        boolean pinned  = PluginPrefs.isPinned(tcKey);
-        boolean inline  = PluginPrefs.NOTE_INLINE.equals(PluginPrefs.getNoteDisplay());
+      // Font: italic for build files
+      Font base = list.getFont();
+      setFont(isBuild ? base.deriveFont(Font.ITALIC) : base.deriveFont(Font.PLAIN));
 
-        // Resolve tag stripe colour for paintComponent.
-        PluginPrefs.TagColor tag = PluginPrefs.getTag(tcKey);
-        tagStripeColor = (tag != PluginPrefs.TagColor.NONE) ? tag.color : null;
-        isHovered      = (index == hoveredRow);
+      // Tooltip
+      if (hasNote) {
+         setToolTipText("<html><b>Note:</b> " + escapeHtml(note) + "</html>");
+      } else {
+         String tip = tc.getToolTipText();
+         setToolTipText(tip != null && !tip.isEmpty() ? tip : null);
+      }
 
-        StringBuilder display = new StringBuilder();
-        if (pinned)            display.append("\uD83D\uDCCC "); // 📌
-        display.append(name);
-        if (hasNote && inline) display.append("  \u270E");      // ✎
-        setText(display.toString());
+      setBorder(new EmptyBorder(2, CLOSE_BTN_WIDTH + 4, 2, 6));
 
-        // Font: italic for build files
-        Font base = list.getFont();
-        setFont(isBuild ? base.deriveFont(Font.ITALIC) : base.deriveFont(Font.PLAIN));
+      java.awt.Image img = tc.getIcon();
+      if (img != null) {
+         setIcon(new ImageIcon(img));
+      } else {
+         setIcon(null);
+      }
 
-        // Tooltip
-        if (hasNote) {
-            setToolTipText("<html><b>Note:</b> " + escapeHtml(note) + "</html>");
-        } else {
-            String tip = tc.getToolTipText();
-            setToolTipText(tip != null && !tip.isEmpty() ? tip : null);
-        }
-
-        setBorder(new EmptyBorder(2, CLOSE_BTN_WIDTH + 4, 2, 6));
-
-        java.awt.Image img = tc.getIcon();
-        if (img != null) setIcon(new ImageIcon(img));
-        else             setIcon(null);
-
-        if (!isSelected) {
-            if (isBuild) {
-                // Build file: slate-blue, overrides modified colour
-                setForeground(BUILD_FILE_COLOR);
-            } else {
-                String htmlName = tc.getHtmlDisplayName();
-                boolean modified = htmlName != null
-                        && (htmlName.contains("<b>") || htmlName.contains("modified")
-                            || htmlName.contains("bold"));
-                if (modified) setForeground(MODIFIED_COLOR);
-
-                TopComponent active = TopComponent.getRegistry().getActivated();
-                if (tc == active) {
-                    setBackground(ACTIVE_BG);
-                    setOpaque(true);
-                }
+      if (!isSelected) {
+         if (isBuild) {
+            // Build file: slate-blue, overrides modified colour
+            setForeground(BUILD_FILE_COLOR);
+         } else {
+            String htmlName = tc.getHtmlDisplayName();
+            boolean modified = htmlName != null
+                    && (htmlName.contains("<b>") || htmlName.contains("modified")
+                    || htmlName.contains("bold"));
+            if (modified) {
+               setForeground(MODIFIED_COLOR);
             }
-        }
 
-        return this;
-    }
+            TopComponent active = TopComponent.getRegistry().getActivated();
+            if (tc == active) {
+               setBackground(ACTIVE_BG);
+               setOpaque(true);
+            }
+         }
+      }
 
-    // ── Paint × button + tag stripe ───────────────────────────────────────
+      return this;
+   }
 
-    @Override
-    protected void paintComponent(Graphics g) {
-        super.paintComponent(g);
+   // ── Paint × button + tag stripe ───────────────────────────────────────
+   @Override
+   protected void paintComponent(Graphics g) {
+      super.paintComponent(g);
 
-        int h  = getHeight();
-        int bx = 0;
+      int h = getHeight();
+      int bx = 0;
 
-        Graphics2D g2 = (Graphics2D) g.create();
-        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+      Graphics2D g2 = (Graphics2D) g.create();
+      g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 
-        // ── Tag stripe: 4px bar just right of the × zone ──────────────────
-        if (tagStripeColor != null) {
-            g2.setColor(tagStripeColor);
-            g2.fillRect(CLOSE_BTN_WIDTH, 2, 4, h - 4);
-        }
+      // ── Tag stripe: 4px bar just right of the × zone ──────────────────
+      if (tagStripeColor != null) {
+         g2.setColor(tagStripeColor);
+         g2.fillRect(CLOSE_BTN_WIDTH, 2, 4, h - 4);
+      }
 
-        // ── Close button ──────────────────────────────────────────────────
-        // Background only on hover — keeps tag stripes visible at rest.
-        if (isHovered) {
-            g2.setColor(CLOSE_HOVER_BG);
-            g2.fillRect(bx + 2, 2, CLOSE_BTN_WIDTH - 2, h - 4);
-        }
+      // ── Close button ──────────────────────────────────────────────────
+      // Background only on hover — keeps tag stripes visible at rest.
+      if (isHovered) {
+         g2.setColor(CLOSE_HOVER_BG);
+         g2.fillRect(bx + 2, 2, CLOSE_BTN_WIDTH - 2, h - 4);
+      }
 
-        // × symbol: full red on hover, muted grey at rest so it's still
-        // discoverable without dominating the row colour.
-        g2.setColor(isHovered ? CLOSE_BTN_COLOR : new Color(160, 160, 160, 120));
-        g2.setFont(g2.getFont().deriveFont(Font.BOLD, 11f));
-        FontMetrics fm = g2.getFontMetrics();
-        String x = "\u00D7"; // ×
-        int tx = bx + (CLOSE_BTN_WIDTH - fm.stringWidth(x)) / 2;
-        int ty = (h + fm.getAscent() - fm.getDescent()) / 2;
-        g2.drawString(x, tx, ty);
+      // × symbol: full red on hover, muted grey at rest so it's still
+      // discoverable without dominating the row colour.
+      g2.setColor(isHovered ? CLOSE_BTN_COLOR : new Color(160, 160, 160, 120));
+      g2.setFont(g2.getFont().deriveFont(Font.BOLD, 11f));
+      FontMetrics fm = g2.getFontMetrics();
+      String x = "\u00D7"; // ×
+      int tx = bx + (CLOSE_BTN_WIDTH - fm.stringWidth(x)) / 2;
+      int ty = (h + fm.getAscent() - fm.getDescent()) / 2;
+      g2.drawString(x, tx, ty);
 
-        g2.dispose();
-    }
+      g2.dispose();
 
-    // ── Utilities ─────────────────────────────────────────────────────────
+      // ── Subtitle note ─────────────────────────────────────────────────
+      if (subtitleNote != null) {
+         Graphics2D g3 = (Graphics2D) g.create();
+         g3.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING,
+                 RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+         Font noteFont = getFont().deriveFont(Font.PLAIN, 10f);
+         g3.setFont(noteFont);
+         FontMetrics nfm = g3.getFontMetrics();
+         // Truncate to fit available width
+         String text = subtitleNote.replace('\n', ' ');
+         int maxW = getWidth() - CLOSE_BTN_WIDTH - 16;
+         if (nfm.stringWidth(text) > maxW) {
+            while (text.length() > 0
+                    && nfm.stringWidth(text + "…") > maxW) {
+               text = text.substring(0, text.length() - 1);
+            }
+            text = text + "…";
+         }
+         Color noteFg;
+         if (getBackground().equals(UIManager.getColor("List.selectionBackground"))) {
+            noteFg = Color.WHITE;
+         } else {
+            noteFg = UIManager.getColor("Label.disabledForeground");
+            if (noteFg == null) {
+               noteFg = new Color(130, 130, 130);
+            }
+         }
+         g3.setColor(noteFg);
+         // Bottom half of the taller row
+         int y = getHeight() - nfm.getDescent() - 3;
+         g3.drawString(text, CLOSE_BTN_WIDTH + 8, y);
+         g3.dispose();
+      }
+   }
 
-    static String escapeHtml(String s) {
-        if (s == null) return "";
-        return s.replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
-                .replace("\"", "&quot;")
-                .replace("\n", "<br>");
-    }
+   // ── Utilities ─────────────────────────────────────────────────────────
+   static String escapeHtml(String s) {
+      if (s == null) {
+         return "";
+      }
+      return s.replace("&", "&amp;")
+              .replace("<", "&lt;")
+              .replace(">", "&gt;")
+              .replace("\"", "&quot;")
+              .replace("\n", "<br>");
+   }
 
-    private static Color blend(Color a, Color b, float t) {
-        int r  = Math.round(a.getRed()   + t * (b.getRed()   - a.getRed()));
-        int g  = Math.round(a.getGreen() + t * (b.getGreen() - a.getGreen()));
-        int bl = Math.round(a.getBlue()  + t * (b.getBlue()  - a.getBlue()));
-        return new Color(
-                Math.max(0, Math.min(255, r)),
-                Math.max(0, Math.min(255, g)),
-                Math.max(0, Math.min(255, bl)));
-    }
+   private static Color blend(Color a, Color b, float t) {
+      int r = Math.round(a.getRed() + t * (b.getRed() - a.getRed()));
+      int g = Math.round(a.getGreen() + t * (b.getGreen() - a.getGreen()));
+      int bl = Math.round(a.getBlue() + t * (b.getBlue() - a.getBlue()));
+      return new Color(
+              Math.max(0, Math.min(255, r)),
+              Math.max(0, Math.min(255, g)),
+              Math.max(0, Math.min(255, bl)));
+   }
 }

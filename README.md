@@ -13,18 +13,40 @@ Tree View:
 RMB Options:
 <img width="637" height="465" alt="image" src="https://github.com/user-attachments/assets/3c144f0f-4263-48ce-aff5-baecf0f2a106" />
 
+---
 
 ## Features
 
 - **List and Tree views** — flat alphabetical list or folder/component tree
-- **Fuzzy search** — filter open files as you type - Ex: CO for CustomerOrder, POL for PurchaseOrderLine ...etc
+- **Fuzzy search** — filter open files as you type — e.g. `CO` for `CustomerOrder`, `POL` for `PurchaseOrderLine`
 - **Pins** — keep important files at the top
 - **User groups** — organize files into named sections
 - **Color tags** — Red / Orange / Green / Blue / Purple for visual status
-- **Notes** — attach a short note to any file
+- **Notes** — attach a short note to any file; display as tooltip, inline `✎` indicator, or subtitle below the filename
 - **Recently Closed** — reopen accidentally closed files (last N, configurable)
 - **IFS actions** — Generate Code, Generate & Deploy, Execute PL/SQL — from the panel
 - **Build file detection** — generated files shown italic/grey, separated into "Generated" section
+- **Quick File Search (`Ctrl+P`)** — fuzzy-search every file across all open projects without leaving the keyboard
+
+---
+
+### Quick File Search
+
+Press **Ctrl+P** anywhere in IFS Developer Studio to open a floating search popup.  
+Type any part of a filename — results update on every keystroke using fuzzy matching.  
+Press **Enter** or click to open the file. **Escape** dismisses.
+
+- Searches both the **customisation layer** (your project workspace) and the **IFS Core Files** checkout simultaneously
+- Files are tagged with a colour badge so you always know which layer a result comes from:
+
+| Badge | Colour | Meaning |
+|-------|--------|---------|
+| *(none)* | — | Your customisation file |
+| `CORE` | Purple | IFS core file (`project.ccs.corefiles` path) |
+| `GEN` | Orange | Generated / build output file |
+
+- **Performance** — the Core Files directory (tens of thousands of files) is scanned **once per IDE session** and held in memory. Subsequent `Ctrl+P` presses are instant. The customisation layer re-scans in the background if the cache is older than 60 seconds.
+- The 🔍 button in the Open Files panel toolbar also opens the dialog.
 
 ---
 
@@ -38,6 +60,8 @@ OpenFilesNavigator/
 │   ├── PluginPrefs.java             # All persistence (java.util.prefs)
 │   ├── FuzzyMatcher.java            # Fuzzy search utility
 │   ├── OpenFilesAction.java         # Menu action entry point
+│   ├── QuickFileSearchDialog.java   # Ctrl+P quick file search popup
+│   ├── QuickFileSearchAction.java   # Action binding for Ctrl+P
 │   ├── layer.xml                    # NetBeans layer registration
 │   └── Bundle.properties            # Localisation strings
 ├── nbproject/
@@ -57,5 +81,4 @@ OpenFilesNavigator/
 3. Select the NBM and click **Install**
 4. Restart the IDE
 5. Open via **Window → Open Files Navigator** or `Ctrl+Shift+O`
-
----
+6. Use **Ctrl+P** to open Quick File Search at any time
