@@ -5,12 +5,15 @@ pinning, grouping, color tags, recently-closed history, and IFS-aware actions.
 
 ---
 List View:
+
 <img width="437" height="567" alt="image" src="https://github.com/user-attachments/assets/11c24440-a7c4-4d4f-be21-2c2cf5c6d39a" />
 
 Tree View:
+
 <img width="442" height="572" alt="image" src="https://github.com/user-attachments/assets/98553e36-b5b0-4ea1-9176-97187356b926" />
 
 RMB Options:
+
 <img width="637" height="465" alt="image" src="https://github.com/user-attachments/assets/3c144f0f-4263-48ce-aff5-baecf0f2a106" />
 
 ---
@@ -45,8 +48,10 @@ Press **Enter** or click to open the file. **Escape** dismisses.
 | `CORE` | Purple | IFS core file (`project.ccs.corefiles` path) |
 | `GEN` | Orange | Generated / build output file |
 
-- **Performance** — the Core Files directory (tens of thousands of files) is scanned **once per IDE session** and held in memory. Subsequent `Ctrl+P` presses are instant. The customisation layer re-scans in the background if the cache is older than 60 seconds.
-- The 🔍 button in the Open Files panel toolbar also opens the dialog.
+- **Performance** — both caches survive dialog close and are held in memory for the entire IDE session:
+  - **Core Files** — scanned once per session, never rescanned automatically (changes rarely)
+  - **Customisation layer** — scanned once, then monitored via a `FileChangeListener` on the project workspace. The cache is only invalidated when files are actually created or deleted. The dialog always opens instantly showing the existing cache; any rebuild runs silently in the background
+- The 🔍 button in the Open Files panel toolbar also opens the dialog
 
 ---
 
