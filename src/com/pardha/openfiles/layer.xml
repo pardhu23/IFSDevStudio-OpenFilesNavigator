@@ -1,13 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE filesystem PUBLIC "-//NetBeans//DTD Filesystem 1.2//EN"
     "http://www.netbeans.org/dtds/filesystem-1_2.dtd">
+
 <filesystem>
-    <!-- Register the TopComponent window -->
+
+    <!-- ── Window registration ───────────────────────────────────────── -->
     <folder name="Windows2">
         <folder name="Components">
             <file name="OpenFilesTopComponent.settings"
                   url="OpenFilesTopComponent.settings"/>
         </folder>
+
         <folder name="Modes">
             <folder name="leftSlidingSide">
                 <file name="OpenFilesTopComponent.wstcref"
@@ -16,17 +19,20 @@
         </folder>
     </folder>
 
-    <!-- Register Action instance -->
+    <!-- ── Actions ───────────────────────────────────────────────────── -->
     <folder name="Actions">
+
         <folder name="Window">
             <file name="com-pardha-openfiles-OpenFilesAction.instance">
+                <attr name="instanceCreate"
+                      methodvalue="org.openide.util.actions.SystemAction.get"/>
                 <attr name="instanceClass"
                       stringvalue="com.pardha.openfiles.OpenFilesAction"/>
             </file>
         </folder>
     </folder>
 
-    <!-- Menu entry: Window > Open Files Navigator (position 150 to avoid conflicts) -->
+    <!-- ── Main menu ─────────────────────────────────────────────────── -->
     <folder name="Menu">
         <folder name="Window">
             <file name="com-pardha-openfiles-OpenFilesAction.shadow">
@@ -34,10 +40,11 @@
                       stringvalue="Actions/Window/com-pardha-openfiles-OpenFilesAction.instance"/>
                 <attr name="position" intvalue="150"/>
             </file>
+
         </folder>
     </folder>
 
-    <!-- Keyboard shortcut: Ctrl+Shift+O -->
+    <!-- ── Shortcuts ─────────────────────────────────────────────────── -->
     <folder name="Shortcuts">
         <file name="OS-shift-O.shadow">
             <attr name="originalFile"

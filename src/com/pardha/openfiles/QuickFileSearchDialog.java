@@ -33,11 +33,20 @@ public final class QuickFileSearchDialog extends JDialog {
     private static QuickFileSearchDialog instance;
 
     public static void showDialog() {
+        showDialog(null);
+    }
+
+    /**
+     * Opens the dialog pre-filled with {@code prefill} text.
+     * Called by {@link FindApiFileAction} after converting an API name.
+     * Pass {@code null} or empty string for a blank search field.
+     */
+    public static void showDialog(String prefill) {
         if (instance == null || !instance.isDisplayable()) {
             Frame owner = WindowManager.getDefault().getMainWindow();
             instance = new QuickFileSearchDialog(owner);
         }
-        instance.openAndFocus();
+        instance.openAndFocus(prefill);
     }
 
     // ── IFS file extensions to index ──────────────────────────────────────
@@ -233,12 +242,20 @@ public final class QuickFileSearchDialog extends JDialog {
 
     // ── Open / close ───────────────────────────────────────────────────────
     private void openAndFocus() {
-        searchField.setText("");
+        openAndFocus(null);
+    }
+
+    private void openAndFocus(String prefill) {
+        searchField.setText(prefill != null ? prefill : "");
         resultModel.clear();
         statusLabel.setText(" ");
         setVisible(true);
         toFront();
         searchField.requestFocusInWindow();
+        // Place caret at end so user can keep typing
+        if (prefill != null && !prefill.isEmpty()) {
+            searchField.setCaretPosition(prefill.length());
+        }
         ensureCache();
     }
 
@@ -700,8 +717,10 @@ public final class QuickFileSearchDialog extends JDialog {
             implements ListCellRenderer<FileEntry> {
 
         // Badge colours — chosen to be visible on both light and dark themes
-        private static final Color BADGE_CORE_BG      = new Color(0x1565C0); // deep blue
-        private static final Color BADGE_GENERATED_BG = new Color(0x558B2F); // olive green
+        // private static final Color BADGE_CORE_BG      = new Color(0x1565C0); // deep blue
+        // private static final Color BADGE_GENERATED_BG = new Color(0x558B2F); // olive green
+        private static final Color BADGE_CORE_BG      = new Color(0x6A1B9A); // purple
+        private static final Color BADGE_GENERATED_BG = new Color(0xE65100); // orange
         private static final Color BADGE_FG            = Color.WHITE;
 
         private final JLabel nameLabel  = new JLabel();
