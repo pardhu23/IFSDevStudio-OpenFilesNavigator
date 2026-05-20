@@ -889,6 +889,25 @@ public final class OpenFilesTopComponent extends TopComponent {
       content.setLayout(new BoxLayout(content, BoxLayout.Y_AXIS));
       content.setBorder(new EmptyBorder(12, 16, 8, 16));
 
+      // ── File indexing extensions ───────────────────────────────────────────
+      addSectionLabel(content, "Quick Search \u2014 indexed file extensions:");
+
+      JTextField extField = new JTextField(PluginPrefs.getIndexExtensions());
+      extField.setAlignmentX(Component.LEFT_ALIGNMENT);
+      extField.setMaximumSize(new Dimension(Integer.MAX_VALUE,
+              extField.getPreferredSize().height));
+
+      JLabel extHint = new JLabel(
+              "Comma-separated, e.g.  entity,projection,plsql,java");
+      extHint.setFont(extHint.getFont().deriveFont(Font.PLAIN, 10f));
+      extHint.setForeground(UIManager.getColor("Label.disabledForeground"));
+      extHint.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+      content.add(extField);
+      content.add(Box.createVerticalStrut(2));
+      content.add(extHint);
+      content.add(Box.createVerticalStrut(12));
+
       // ── Note display ──────────────────────────────────────────────────
       addSectionLabel(content, "Note display:");
       ButtonGroup noteBg = new ButtonGroup();
@@ -1066,6 +1085,13 @@ public final class OpenFilesTopComponent extends TopComponent {
          PluginPrefs.setClosedHistoryLimit((Integer) limitSpinner.getValue());
          refreshList();
          rebuildClosedStrip();
+         // ── File indexing extensions ───────────────────────────────────
+         String newExts = extField.getText().trim();
+         if (!newExts.equals(PluginPrefs.getIndexExtensions())) {
+            PluginPrefs.setIndexExtensions(newExts);
+            QuickFileSearchDialog.markCustCacheStale();
+         }
+
          dlg.dispose();
       });
       cancel.addActionListener(ev -> dlg.dispose());
@@ -2523,6 +2549,17 @@ public final class OpenFilesTopComponent extends TopComponent {
    // =========================================================================
    @Override
    public void componentOpened() {
+      org.openide.filesystems.FileObject fo = FileUtil.toFileObject(
+              FileUtil.normalizeFile(new java.io.File("E:\\NetBeansProjects\\Siff_Dev_24_1\\build\\gen\\db\\cmod\\database\\cmod\\CSiffScaleIntLog-Base.storage")));
+      if (fo != null) {
+         System.err.println("MIME: " + fo.getMIMEType());
+      }
+
+      org.openide.filesystems.FileObject fo1 = FileUtil.toFileObject(
+              FileUtil.normalizeFile(new java.io.File("E:\\NetBeansProjects\\Siff_Dev_24_1\\workspace\\cmod\\source\\cmod\\database\\CPulseInterfaceHanding-Cust.plsvc")));
+      if (fo1 != null) {
+         System.err.println("MIME: " + fo1.getMIMEType());
+      }
       SwingUtilities.invokeLater(() -> {
          WindowManager wm = WindowManager.getDefault();
          Mode currentMode = wm.findMode(this);
@@ -2543,6 +2580,7 @@ public final class OpenFilesTopComponent extends TopComponent {
       registerListeners();
       refreshList();
       scheduleDelayedRefresh();
+      QuickFileSearchDialog.ensureIndexed();
    }
 
    @Override
