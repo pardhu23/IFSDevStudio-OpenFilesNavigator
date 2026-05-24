@@ -1,5 +1,11 @@
 package com.pardha.openfiles;
 
+import static com.pardha.openfiles.PluginPrefs.TagColor.BLUE;
+import static com.pardha.openfiles.PluginPrefs.TagColor.GREEN;
+import static com.pardha.openfiles.PluginPrefs.TagColor.NONE;
+import static com.pardha.openfiles.PluginPrefs.TagColor.ORANGE;
+import static com.pardha.openfiles.PluginPrefs.TagColor.PURPLE;
+import static com.pardha.openfiles.PluginPrefs.TagColor.RED;
 import java.awt.*;
 import java.awt.event.*;
 import java.beans.PropertyChangeEvent;
@@ -61,6 +67,9 @@ public final class OpenFilesTopComponent extends TopComponent {
            = "org.netbeans.modules.plsql.execution.actions.GenerateCodeAndDeployNodeAction";
    private static final String ACT_GENERATE_DEPLOY_DEPENDENTS
            = "ifs.dev.nb.project.ui.explorer.version2.actions.GenCodeDeployWithDependentsAction";
+   private static final String CAT_MODEL_CONFIG = "IFS-Models";
+   private static final String ACT_CUSTOMIZE_THIS
+           = "ifs.dev.nb.model.config.action.CustomizeThisAction";
 
    /**
     * Editor action name for executing a PL/SQL file — kept for reference only.
@@ -1289,6 +1298,26 @@ public final class OpenFilesTopComponent extends TopComponent {
             }
          }
 
+         // ── Customize This (core files only) ──────────────────────────────────
+         if (single) {
+            TopComponent singleTc = nonBuildTargets.size() == 1
+                    ? nonBuildTargets.get(0)
+                    : null;
+            if (singleTc != null) {
+               String tip = singleTc.getToolTipText();
+               System.err.println("[CustomizeThis DEBUG] single TC tip='" + tip + "'");
+               System.err.println("[CustomizeThis DEBUG] isCoreFile=" + isCoreFile(singleTc));
+            }
+            if (singleTc != null && isCoreFile(singleTc)) {
+               JMenuItem customizeItem = new JMenuItem("Customize This");
+               customizeItem.addActionListener(e -> {
+                  System.err.println("[CustomizeThis DEBUG] menu item clicked");
+                  runCustomizeThis(singleTc);
+               });
+               menu.add(customizeItem);
+            }
+         }
+
          menu.addSeparator();
          JMenuItem genCode = new JMenuItem("Generate Code");
          genCode.addActionListener(e
@@ -1923,6 +1952,13 @@ public final class OpenFilesTopComponent extends TopComponent {
       if (name == null) {
          return "";
       }
+
+      // Strip everything from the first space onwards (e.g. " [r/o]", " (read-only)")
+      int space = name.indexOf(' ');
+      if (space > 0) {
+         name = name.substring(0, space);
+      }
+
       int dot = name.lastIndexOf('.');
       return dot > 0 ? name.substring(dot + 1).toLowerCase(Locale.ROOT) : "";
    }
@@ -1977,6 +2013,18 @@ public final class OpenFilesTopComponent extends TopComponent {
          }
       }
       return "Other";
+   }
+
+   private boolean isCoreFile(TopComponent tc) {
+      String tip = tc.getToolTipText();
+      if (tip == null || tip.trim().isEmpty()) {
+         return false;
+      }
+      String path = tip.replace('\\', '/').toLowerCase(Locale.ROOT)
+              .replaceAll("<[^>]+>", "").trim();
+      // Core files live under the core checkout root, not the workspace root.
+      // The project layer always has "workspace/" in its path; core files don't.
+      return path.contains("/checkout/") && !path.contains("/workspace/");
    }
 
    /**
@@ -2490,6 +2538,230 @@ public final class OpenFilesTopComponent extends TopComponent {
       });
       t.setRepeats(false);
       t.start();
+   }
+
+   /**
+    * Maps non-model file extensions to their corresponding model file.
+    * .plsql / .view / .storage → .entity
+    * .plsvc → .projection
+    * Returns the remapped FileObject, or the original if no mapping needed.
+    */
+   private FileObject remapToModelFile(FileObject fo) {
+      String ext = fo.getExt().toLowerCase(Locale.ROOT);
+      String[] targetExts;
+      switch (ext) {
+         case "plsql":
+         case "views":
+         case "storage":
+            // Try entity first, then utility
+            targetExts = new String[]{"entity", "utility"};
+            break;
+         case "plsvc":
+            targetExts = new String[]{"projection", "fragment"};
+            break;
+         default:
+            return fo;
+      }
+
+      String baseName = fo.getName();
+      String lowerBase = baseName.toLowerCase(Locale.ROOT);
+      if (lowerBase.endsWith("-cust") || lowerBase.endsWith("-base")) {
+         baseName = baseName.substring(0, baseName.length() - 5);
+      }
+
+      // Resolve model dir: .../accrul/model/accrul/
+      FileObject databaseDir = fo.getParent();
+      FileObject innerCompDir = databaseDir.getParent();
+      FileObject sourceTypeDir = innerCompDir.getParent();
+      FileObject moduleDir = sourceTypeDir.getParent();
+
+      String compName = innerCompDir.getNameExt().toLowerCase(Locale.ROOT);
+      FileObject modelDir = moduleDir.getFileObject("model/" + compName);
+
+      // Search locations: same dir + model dir
+      FileObject[] searchDirs = modelDir != null
+              ? new FileObject[]{fo.getParent(), modelDir}
+              : new FileObject[]{fo.getParent()};
+
+      for (String targetExt : targetExts) {
+         for (FileObject dir : searchDirs) {
+            FileObject sibling = dir.getFileObject(baseName, targetExt);
+            if (sibling != null) {
+               System.err.println("[OpenFilesNavigator] CustomizeThis: remapped "
+                       + fo.getNameExt() + " → " + sibling.getNameExt());
+               return sibling;
+            }
+         }
+      }
+
+      System.err.println("[OpenFilesNavigator] CustomizeThis: no model file found for "
+              + fo.getNameExt() + " (tried: " + java.util.Arrays.toString(targetExts) + ")");
+      return null;
+   }
+
+   private void runCustomizeThis(TopComponent tc) {
+      try {
+         String tip = tc.getToolTipText();
+         if (tip == null || tip.trim().isEmpty()) {
+            return;
+         }
+
+         String path = tip.replace('\\', '/').trim()
+                 .replaceAll("<[^>]+>", "").trim();
+         path = path.replaceAll("\\s+[\\(\\[][^\\)\\]]*[\\)\\]]\\s*$", "").trim();
+
+         java.io.File file = FileUtil.normalizeFile(
+                 new java.io.File(path.replace('/', java.io.File.separatorChar)));
+         if (!file.exists()) {
+            return;
+         }
+
+         FileObject fo = FileUtil.toFileObject(file);
+         if (fo == null) {
+            return;
+         }
+
+         fo = remapToModelFile(fo);
+         DataObject dob = DataObject.find(fo);
+
+         // Find owning project via core files root
+         org.netbeans.api.project.Project owningProject = null;
+         for (org.netbeans.api.project.Project p
+                 : org.netbeans.api.project.ui.OpenProjects.getDefault().getOpenProjects()) {
+            FileObject projDir = p.getProjectDirectory();
+            if (projDir == null) {
+               continue;
+            }
+            java.io.File projRoot = FileUtil.toFile(projDir);
+            if (projRoot == null) {
+               continue;
+            }
+            java.io.File coreRoot = readCoreFilesRootForProject(projRoot);
+            if (coreRoot != null) {
+               FileObject coreFo = FileUtil.toFileObject(coreRoot);
+               if (coreFo != null && FileUtil.isParentOf(coreFo, fo)) {
+                  owningProject = p;
+                  break;
+               }
+            }
+         }
+
+         if (owningProject == null) {
+            System.err.println("[OpenFilesNavigator] CustomizeThis: no owning project found");
+            return;
+         }
+
+         final org.netbeans.api.project.Project finalProject = owningProject;
+
+         // FilterNode that adds Project into the node lookup —
+         // CustomizeThisAction.findProjectForNode() checks node.getLookup().lookup(Project.class) first
+         Lookup mergedLookup = new ProxyLookup(
+                 dob.getLookup(),
+                 org.openide.util.lookup.Lookups.singleton(finalProject)
+         );
+         org.openide.nodes.Node decoratedNode = new org.openide.nodes.FilterNode(
+                 dob.getNodeDelegate(), null, mergedLookup);
+
+         Action action = Actions.forID("IFS-Models",
+                 "ifs.dev.nb.model.config.action.CustomizeThisAction");
+         if (action == null) {
+            System.err.println("[OpenFilesNavigator] CustomizeThisAction not found");
+            return;
+         }
+
+         tc.requestActive();
+         final org.openide.nodes.Node[] nodes = new org.openide.nodes.Node[]{decoratedNode};
+
+         javax.swing.Timer t = new javax.swing.Timer(300, e -> {
+            try {
+               // Load CustomizeThisAction via the IFS module's classloader
+               // (reachable through the DataObject which is an IFS type)
+               ClassLoader ifsLoader = dob.getClass().getClassLoader();
+
+               @SuppressWarnings("unchecked")
+               Class<? extends org.openide.util.actions.SystemAction> actionClass
+                       = (Class<? extends org.openide.util.actions.SystemAction>) Class.forName(
+                               "ifs.dev.nb.model.config.action.CustomizeThisAction",
+                               true,
+                               ifsLoader);
+
+               org.openide.util.actions.SystemAction realAction
+                       = org.openide.util.actions.SystemAction.get(actionClass);
+
+               System.err.println("[CustomizeThis] realAction=" + realAction
+                       + " class=" + realAction.getClass().getName());
+
+               // Walk the hierarchy for performAction(Node[]) — CookieAction declares it
+               java.lang.reflect.Method m = null;
+               Class<?> cls = realAction.getClass();
+               while (cls != null) {
+                  try {
+                     m = cls.getDeclaredMethod("performAction",
+                             org.openide.nodes.Node[].class);
+                     break;
+                  } catch (NoSuchMethodException nsme) {
+                     cls = cls.getSuperclass();
+                  }
+               }
+
+               if (m == null) {
+                  System.err.println("[OpenFilesNavigator] CustomizeThis: "
+                          + "performAction not found in hierarchy of "
+                          + realAction.getClass().getName());
+                  return;
+               }
+
+               m.setAccessible(true);
+               m.invoke(realAction, (Object) nodes);
+               System.err.println("[OpenFilesNavigator] CustomizeThis: OK");
+
+            } catch (ClassNotFoundException cnfe) {
+               System.err.println("[OpenFilesNavigator] CustomizeThis: class not found: " + cnfe);
+            } catch (Exception ex) {
+               System.err.println("[OpenFilesNavigator] CustomizeThis failed: " + ex);
+               ex.printStackTrace(System.err);
+            }
+         });
+         t.setRepeats(false);
+         t.start();
+
+      } catch (DataObjectNotFoundException ex) {
+         System.err.println("[OpenFilesNavigator] CustomizeThis: DataObject not found: " + ex);
+      } catch (Exception ex) {
+         System.err.println("[OpenFilesNavigator] CustomizeThis failed: " + ex);
+      }
+   }
+
+   // Reads project.ccs.corefiles from nbproject/project.properties
+   private java.io.File readCoreFilesRootForProject(java.io.File projectDir) {
+      java.io.File[] candidates = {
+         new java.io.File(projectDir, "nbproject/project.properties"),
+         new java.io.File(projectDir, "project.properties")
+      };
+      for (java.io.File propsFile : candidates) {
+         if (!propsFile.exists()) {
+            continue;
+         }
+         java.util.Properties props = new java.util.Properties();
+         try (java.io.FileInputStream fis = new java.io.FileInputStream(propsFile)) {
+            props.load(fis);
+         } catch (Exception ex) {
+            continue;
+         }
+         String val = props.getProperty("project.ccs.corefiles");
+         if (val == null || val.trim().isEmpty()) {
+            continue;
+         }
+         java.io.File f = new java.io.File(val.trim());
+         if (!f.isAbsolute()) {
+            f = new java.io.File(projectDir, val.trim());
+         }
+         f = FileUtil.normalizeFile(f);
+         if (f.isDirectory()) {
+            return f;
+         }
+      }
+      return null;
    }
 
    private void runActionOnTargets(String category, String actionId,

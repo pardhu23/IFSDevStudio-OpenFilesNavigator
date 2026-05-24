@@ -888,10 +888,24 @@ public final class QuickFileSearchDialog extends JDialog {
                tierScore = 10;
             }
 
+            String lowerFull = lowerName; // full name with extension, lowercased
+
             if (matchBase.startsWith(query)) {
-               entry.score = tierScore + 10; // prefix bonus within tier
+               entry.score = tierScore + 10;
                matched.add(entry);
             } else if (matchBase.contains(query)) {
+               entry.score = tierScore;
+               matched.add(entry);
+            } else if (lowerBase.startsWith(query)) {    // <-- ADD: matches "customerorder-cust"
+               entry.score = tierScore + 10;
+               matched.add(entry);
+            } else if (lowerBase.contains(query)) {          // <-- ADD: contains "customerorder-cust"
+               entry.score = tierScore;
+               matched.add(entry);
+            } else if (lowerFull.startsWith(query)) {    // <-- ADD: matches "customerorder-cust.plsql"
+               entry.score = tierScore + 10;
+               matched.add(entry);
+            } else if (lowerFull.contains(query)) {          // <-- ADD: contains "customerorder-cust.plsql"
                entry.score = tierScore;
                matched.add(entry);
             }
@@ -901,8 +915,30 @@ public final class QuickFileSearchDialog extends JDialog {
             String baseB = getBaseName(b.name);
             String lowerBaseA = baseA.toLowerCase(Locale.ROOT);
             String lowerBaseB = baseB.toLowerCase(Locale.ROOT);
+            String lowerFullA = a.name.toLowerCase(Locale.ROOT);
+            String lowerFullB = b.name.toLowerCase(Locale.ROOT);
 
-            // Primary: prefix match base names before contains match base names
+            // Primary: exact filename match floats to top
+            boolean aExact = lowerFullA.equals(query);
+            boolean bExact = lowerFullB.equals(query);
+            if (aExact && !bExact) {
+               return -1;
+            }
+            if (!aExact && bExact) {
+               return 1;
+            }
+
+            // Secondary: prefix match on full filename
+            boolean aFullPrefix = lowerFullA.startsWith(query);
+            boolean bFullPrefix = lowerFullB.startsWith(query);
+            if (aFullPrefix && !bFullPrefix) {
+               return -1;
+            }
+            if (!aFullPrefix && bFullPrefix) {
+               return 1;
+            }
+
+            // Tertiary: prefix match on base name
             boolean aPrefixMatch = lowerBaseA.startsWith(query);
             boolean bPrefixMatch = lowerBaseB.startsWith(query);
             if (aPrefixMatch && !bPrefixMatch) {
@@ -912,19 +948,19 @@ public final class QuickFileSearchDialog extends JDialog {
                return 1;
             }
 
-            // Secondary: group by base name alphabetically
+            // Quaternary: group by base name alphabetically
             int nameCmp = baseA.compareToIgnoreCase(baseB);
             if (nameCmp != 0) {
                return nameCmp;
             }
 
-            // Tertiary: within same base name, sort by tier (highest score first)
+            // Quinary: within same base name, sort by tier (highest score first)
             int cmp = Integer.compare(b.score, a.score);
             if (cmp != 0) {
                return cmp;
             }
 
-            // Quaternary: alphabetical by full filename
+            // Senary: alphabetical by full filename
             return a.name.compareToIgnoreCase(b.name);
          });
       }
