@@ -113,6 +113,10 @@ public final class OpenFilesTopComponent extends TopComponent {
    private static final String CARD_LIST = "list";
    private static final String CARD_TREE = "tree";
 
+   /**
+    * Toolbar button that opens the stash/restore dropdown.
+    */
+   private JButton stashBtn;
    // ── Recently-closed strip ─────────────────────────────────────────────
    /**
     * Outer wrapper added to BorderLayout.SOUTH — always present in the layout.
@@ -267,6 +271,13 @@ public final class OpenFilesTopComponent extends TopComponent {
       listBtn.addActionListener(e -> switchView(ViewMode.LIST));
       treeBtn.addActionListener(e -> switchView(ViewMode.TREE));
 
+      stashBtn = new JButton("\uD83D\uDDC3"); // 🗃
+      stashBtn.setFocusable(false);
+      stashBtn.setMargin(new Insets(1, 4, 1, 4));
+      stashBtn.setFont(stashBtn.getFont().deriveFont(12f));
+      stashBtn.setToolTipText("Stash / Restore open files");
+      stashBtn.addActionListener(e -> showStashPopup(stashBtn));
+
       JButton settingsBtn = new JButton("\u2699"); // ⚙
       settingsBtn.setFocusable(false);
       settingsBtn.setMargin(new Insets(1, 4, 1, 4));
@@ -287,6 +298,7 @@ public final class OpenFilesTopComponent extends TopComponent {
       btnPanel.add(treeBtn);
       btnPanel.add(Box.createHorizontalStrut(4));
       btnPanel.add(quickSearchBtn);          // ← Search Button
+      btnPanel.add(stashBtn);                // ← Stash  Button
       btnPanel.add(settingsBtn);
       titleRow.add(btnPanel, BorderLayout.EAST);
       northPanel.add(titleRow, BorderLayout.NORTH);
@@ -901,10 +913,16 @@ public final class OpenFilesTopComponent extends TopComponent {
       // ── File indexing extensions ───────────────────────────────────────────
       addSectionLabel(content, "Quick Search \u2014 indexed file extensions:");
 
-      JTextField extField = new JTextField(PluginPrefs.getIndexExtensions());
-      extField.setAlignmentX(Component.LEFT_ALIGNMENT);
-      extField.setMaximumSize(new Dimension(Integer.MAX_VALUE,
-              extField.getPreferredSize().height));
+      JTextArea extField = new JTextArea(PluginPrefs.getIndexExtensions(), 3, 0);
+      extField.setLineWrap(true);
+      extField.setWrapStyleWord(false);   // wrap at any char — commas not spaces
+      extField.setFont(new JTextField().getFont()); // match text field font
+      extField.setBorder(UIManager.getBorder("TextField.border"));
+      JScrollPane extScroll = new JScrollPane(extField,
+              JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED,
+              JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+      extScroll.setAlignmentX(Component.LEFT_ALIGNMENT);
+      extScroll.setMaximumSize(new Dimension(Integer.MAX_VALUE, 72)); // ~3 rows
 
       JLabel extHint = new JLabel(
               "Comma-separated, e.g.  entity,projection,plsql,java");
@@ -912,7 +930,7 @@ public final class OpenFilesTopComponent extends TopComponent {
       extHint.setForeground(UIManager.getColor("Label.disabledForeground"));
       extHint.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-      content.add(extField);
+      content.add(extScroll);
       content.add(Box.createVerticalStrut(2));
       content.add(extHint);
       content.add(Box.createVerticalStrut(12));
@@ -989,6 +1007,31 @@ public final class OpenFilesTopComponent extends TopComponent {
       sortOpenOrderRb.setAlignmentX(Component.LEFT_ALIGNMENT);
       content.add(sortAlphaRb);
       content.add(sortOpenOrderRb);
+      content.add(Box.createVerticalStrut(12));
+
+      // ── Deployment order ────────────────────────────────────────────────
+      addSectionLabel(content, "Generate & Deploy \u2014 multi-file extension order:");
+
+      JTextArea deployOrderField = new JTextArea(PluginPrefs.getDeployOrder(), 3, 0);
+      deployOrderField.setLineWrap(true);
+      deployOrderField.setWrapStyleWord(false);
+      deployOrderField.setFont(new JTextField().getFont());
+      deployOrderField.setBorder(UIManager.getBorder("TextField.border"));
+      JScrollPane deployOrderScroll = new JScrollPane(deployOrderField,
+              JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED,
+              JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+      deployOrderScroll.setAlignmentX(Component.LEFT_ALIGNMENT);
+      deployOrderScroll.setMaximumSize(new Dimension(Integer.MAX_VALUE, 72));
+
+      JLabel deployHint = new JLabel(
+              "Comma-separated. Deploys left-to-right; unlisted extensions go last (A\u2013Z).");
+      deployHint.setFont(deployHint.getFont().deriveFont(Font.PLAIN, 10f));
+      deployHint.setForeground(UIManager.getColor("Label.disabledForeground"));
+      deployHint.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+      content.add(deployOrderScroll);
+      content.add(Box.createVerticalStrut(2));
+      content.add(deployHint);
       content.add(Box.createVerticalStrut(12));
 
       // ── Recently-closed history ────────────────────────────────────────
@@ -1100,7 +1143,12 @@ public final class OpenFilesTopComponent extends TopComponent {
             PluginPrefs.setIndexExtensions(newExts);
             QuickFileSearchDialog.markCustCacheStale();
          }
-
+         // ── Deployment Order extensions ───────────────────────────────────
+         String newDeployOrder = deployOrderField.getText()
+                 .replace("\n", "").replace("\r", "").trim();
+         if (!newDeployOrder.equals(PluginPrefs.getDeployOrder())) {
+            PluginPrefs.setDeployOrder(newDeployOrder);
+         }
          dlg.dispose();
       });
       cancel.addActionListener(ev -> dlg.dispose());
@@ -1634,6 +1682,10 @@ public final class OpenFilesTopComponent extends TopComponent {
             refreshList();
          }
       }));
+
+      // ── Stash selected files ──────────────────────────────────────────
+      menu.addSeparator();
+      menu.add(menuItem("Stash selected files\u2026", e -> stashTargets(targets)));
    }
 
    // ── Execute PL/SQL Command ─────────────────────────────────────────────
@@ -1780,9 +1832,13 @@ public final class OpenFilesTopComponent extends TopComponent {
     * IFS execution engine can finish one before the next starts.
     */
    private void executeSequentially(java.util.List<TopComponent> targets) {
+      java.util.List<TopComponent> ordered = new java.util.ArrayList<>(targets);
+      PluginPrefs.sortByDeployOrder(ordered,
+              this::resolveExtension,
+              this::resolveDisplayName);
       RP.post(() -> {
-         for (int i = 0; i < targets.size(); i++) {
-            final TopComponent tc = targets.get(i);
+         for (int i = 0; i < ordered.size(); i++) {
+            final TopComponent tc = ordered.get(i);
             if (!tc.isOpened()) {
                continue;
             }
@@ -1804,7 +1860,7 @@ public final class OpenFilesTopComponent extends TopComponent {
                   System.err.println("[OpenFilesNavigator] Execute sequential: " + ex);
                }
             });
-            if (i < targets.size() - 1) {
+            if (i < ordered.size() - 1) {
                try {
                   Thread.sleep(800);
                } catch (InterruptedException ignored) {
@@ -2769,6 +2825,7 @@ public final class OpenFilesTopComponent extends TopComponent {
       if (targets.isEmpty()) {
          return;
       }
+
       if (targets.size() == 1) {
          TopComponent single = targets.get(0);
          SwingUtilities.invokeLater(() -> {
@@ -2787,8 +2844,53 @@ public final class OpenFilesTopComponent extends TopComponent {
          });
          return;
       }
+
+      // Multi-file deploy: sort by configured extension order then fire
+      // one file at a time so IFS finishes each deploy before the next.
+      boolean isDeployAction = ACT_GENERATE_DEPLOY.equals(actionId)
+              || ACT_GENERATE_DEPLOY_DEPENDENTS.equals(actionId);
+
+      if (isDeployAction) {
+         java.util.List<TopComponent> ordered = new java.util.ArrayList<>(targets);
+         PluginPrefs.sortByDeployOrder(ordered,
+                 this::resolveExtension,
+                 this::resolveDisplayName);
+
+         RP.post(() -> {
+            for (int i = 0; i < ordered.size(); i++) {
+               final TopComponent tc = ordered.get(i);
+               if (!tc.isOpened()) {
+                  continue;
+               }
+               SwingUtilities.invokeLater(() -> {
+                  tc.requestActive();
+                  Action action = Actions.forID(category, actionId);
+                  if (action == null) {
+                     System.err.println("[OpenFilesNavigator] Action not found: "
+                             + category + " / " + actionId);
+                     return;
+                  }
+                  Action ctx = (action instanceof ContextAwareAction)
+                          ? ((ContextAwareAction) action)
+                                  .createContextAwareInstance(tc.getLookup())
+                          : action;
+                  ctx.actionPerformed(new ActionEvent(
+                          tc, ActionEvent.ACTION_PERFORMED, ""));
+               });
+               if (i < ordered.size() - 1) {
+                  try {
+                     Thread.sleep(800);
+                  } catch (InterruptedException ignored) {
+                  }
+               }
+            }
+         });
+         return;
+      }
+
+      // Generate Code — order-independent, ProxyLookup as before.
       SwingUtilities.invokeLater(() -> {
-         java.util.List<Lookup> lookups = new ArrayList<>(targets.size());
+         java.util.List<Lookup> lookups = new java.util.ArrayList<>(targets.size());
          for (TopComponent tc : targets) {
             if (tc.isOpened()) {
                lookups.add(tc.getLookup());
@@ -3007,5 +3109,296 @@ public final class OpenFilesTopComponent extends TopComponent {
          g2.fillOval(x, y, d, d);
          g2.dispose();
       }
+   }
+   // =========================================================================
+   // Stash
+   // =========================================================================
+
+   /**
+    * Dropdown anchored to the stash toolbar button.
+    *
+    * Layout:
+    * [Stash current files…] ← always shown
+    * ─────────────────────
+    * 📋 StashName (N files) ▶ Restore / Peek / Delete
+    * …
+    */
+   private void showStashPopup(JButton anchor) {
+      JPopupMenu menu = new JPopupMenu();
+
+      JMenuItem stashNow = new JMenuItem("\uD83D\uDDC3  Stash current files\u2026");
+      stashNow.setFont(stashNow.getFont().deriveFont(Font.BOLD));
+      stashNow.setEnabled(!allEditors.isEmpty());
+      stashNow.addActionListener(e -> stashAllOpen());
+      menu.add(stashNow);
+
+      menu.addSeparator();
+
+      java.util.List<PluginPrefs.StashEntry> stashes = PluginPrefs.getStashes();
+      if (stashes.isEmpty()) {
+         JMenuItem empty = new JMenuItem("(no stashes yet)");
+         empty.setEnabled(false);
+         menu.add(empty);
+      } else {
+         for (PluginPrefs.StashEntry stash : stashes) {
+            JMenu sub = new JMenu("\uD83D\uDCCB " + stash.name
+                    + "  (" + stash.size() + ")");
+            sub.add(menuItem("Restore \u2014 reopen all files", e -> restoreStash(stash)));
+            sub.add(menuItem("Peek \u2014 show file list\u2026", e -> peekStash(stash)));
+            sub.addSeparator();
+            sub.add(menuItem("Delete stash", e -> {
+               int res = JOptionPane.showConfirmDialog(this,
+                       "Delete stash \u201C" + stash.name + "\u201D?",
+                       "Delete Stash", JOptionPane.YES_NO_OPTION);
+               if (res == JOptionPane.YES_OPTION) {
+                  PluginPrefs.deleteStash(stash.name);
+               }
+            }));
+            menu.add(sub);
+         }
+      }
+
+      menu.show(anchor, 0, anchor.getHeight());
+   }
+
+   /**
+    * Prompts for a name, asks for close confirmation, then stashes all
+    * currently open editor files and closes them.
+    */
+   private void stashAllOpen() {
+      stashTargets(new java.util.ArrayList<>(allEditors));
+   }
+
+   /**
+    * Core stash logic shared by "stash all" and "stash selected".
+    *
+    * Flow:
+    * 1. Collect paths (skip TCs with no resolvable path).
+    * 2. Show name dialog with a timestamp default.
+    * 3. Show confirmation listing the files that will be closed.
+    * 4. Save stash → close TCs.
+    */
+   private void stashTargets(java.util.List<TopComponent> targets) {
+      if (targets.isEmpty()) {
+         return;
+      }
+
+      // Resolve items — skip any TC that has no path
+      java.util.List<PluginPrefs.StashItem> items = new java.util.ArrayList<>();
+      for (TopComponent tc : targets) {
+         String path = resolveAbsPath(tc);
+         if (path == null) {
+            continue;
+         }
+         String name = resolveDisplayName(tc);
+         if (name == null) {
+            name = tc.getName();
+         }
+         items.add(new PluginPrefs.StashItem(name, path));
+      }
+
+      if (items.isEmpty()) {
+         JOptionPane.showMessageDialog(this,
+                 "None of the selected files have resolvable paths\n"
+                 + "and cannot be stashed.",
+                 "Stash", JOptionPane.WARNING_MESSAGE);
+         return;
+      }
+
+      // ── Step 1: name dialog ───────────────────────────────────────────
+      String defaultName = new java.text.SimpleDateFormat("MMM dd HH:mm")
+              .format(new java.util.Date());
+      String name = (String) JOptionPane.showInputDialog(
+              this,
+              "Name this stash:",
+              "Stash " + items.size() + " file" + (items.size() == 1 ? "" : "s"),
+              JOptionPane.PLAIN_MESSAGE,
+              null, null, defaultName);
+
+      if (name == null) {
+         return; // cancelled
+      }
+      name = name.trim();
+      if (name.isEmpty()) {
+         name = defaultName;
+      }
+
+      // ── Step 2: confirmation listing files that will close ────────────
+      StringBuilder sb = new StringBuilder(
+              "<html>The following " + items.size() + " file"
+              + (items.size() == 1 ? "" : "s")
+              + " will be <b>closed</b> and saved to stash \u201C"
+              + OpenFilesCellRenderer.escapeHtml(name) + "\u201D:<br><br>");
+      int shown = Math.min(items.size(), 12);
+      for (int i = 0; i < shown; i++) {
+         sb.append("\u2022 ")
+                 .append(OpenFilesCellRenderer.escapeHtml(items.get(i).displayName))
+                 .append("<br>");
+      }
+      if (items.size() > shown) {
+         sb.append("\u2026 and ").append(items.size() - shown).append(" more<br>");
+      }
+      sb.append("<br>Continue?</html>");
+
+      int confirm = JOptionPane.showConfirmDialog(
+              this, sb.toString(),
+              "Confirm Stash", JOptionPane.YES_NO_OPTION,
+              JOptionPane.QUESTION_MESSAGE);
+
+      if (confirm != JOptionPane.YES_OPTION) {
+         return;
+      }
+
+      // ── Step 3: save + close ──────────────────────────────────────────
+      final String finalName = name;
+      final java.util.List<PluginPrefs.StashItem> finalItems = items;
+
+      // Close on EDT; snapshot is safe because paths are already extracted.
+      PluginPrefs.saveStash(finalName, finalItems);
+      // Use a copy of targets so the loop isn't affected by list changes
+      // triggered by the PROP_OPENED listener during close.
+      new java.util.ArrayList<>(targets).forEach(TopComponent::close);
+   }
+
+   /**
+    * Reopens every file in the stash. Missing files are silently skipped
+    * and reported in a summary dialog only if at least one was skipped.
+    * The stash is intentionally NOT deleted — user deletes manually when done.
+    */
+   private void restoreStash(PluginPrefs.StashEntry stash) {
+      int opened = 0, skipped = 0;
+      for (PluginPrefs.StashItem item : stash.items) {
+         if (!item.hasPath()) {
+            skipped++;
+            continue;
+         }
+         try {
+            java.io.File file = FileUtil.normalizeFile(
+                    new java.io.File(
+                            item.absolutePath.replace('/', java.io.File.separatorChar)));
+            if (!file.exists()) {
+               System.err.println("[OpenFilesNavigator] Stash restore: missing "
+                       + item.absolutePath);
+               skipped++;
+               continue;
+            }
+            FileObject parentFo = FileUtil.toFileObject(file.getParentFile());
+            if (parentFo != null) {
+               parentFo.refresh();
+            }
+            FileObject fo = FileUtil.toFileObject(file);
+            if (fo == null) {
+               skipped++;
+               continue;
+            }
+
+            DataObject dob = DataObject.find(fo);
+            OpenCookie oc = dob.getLookup().lookup(OpenCookie.class);
+            if (oc != null) {
+               oc.open();
+               opened++;
+            } else {
+               javax.swing.Action action
+                       = dob.getNodeDelegate().getPreferredAction();
+               if (action instanceof ContextAwareAction) {
+                  action = ((ContextAwareAction) action)
+                          .createContextAwareInstance(dob.getLookup());
+               }
+               if (action != null && action.isEnabled()) {
+                  action.actionPerformed(new ActionEvent(
+                          this, ActionEvent.ACTION_PERFORMED, ""));
+                  opened++;
+               } else {
+                  skipped++;
+               }
+            }
+         } catch (DataObjectNotFoundException ex) {
+            System.err.println("[OpenFilesNavigator] Stash restore: DataObject not found "
+                    + item.absolutePath + ": " + ex);
+            skipped++;
+         } catch (Exception ex) {
+            System.err.println("[OpenFilesNavigator] Stash restore: failed for "
+                    + item.absolutePath + ": " + ex);
+            skipped++;
+         }
+      }
+
+      if (skipped > 0) {
+         JOptionPane.showMessageDialog(this,
+                 "Restored " + opened + " file" + (opened == 1 ? "" : "s") + ".\n"
+                 + skipped + " file" + (skipped == 1 ? "" : "s")
+                 + " could not be found and were skipped.",
+                 "Stash Restored", JOptionPane.INFORMATION_MESSAGE);
+      }
+   }
+
+   /**
+    * Shows a non-modal dialog listing all files in the stash.
+    * Lets the user inspect the contents before committing to restore.
+    */
+   private void peekStash(PluginPrefs.StashEntry stash) {
+      JDialog dlg = new JDialog(
+              (java.awt.Frame) SwingUtilities.getWindowAncestor(this),
+              "Stash: " + stash.name, false);
+      dlg.setLayout(new BorderLayout(8, 8));
+
+      DefaultListModel<String> model = new DefaultListModel<>();
+      for (PluginPrefs.StashItem item : stash.items) {
+         String marker = item.hasPath() ? "" : "  \u26A0"; // ⚠ when no path
+         model.addElement(item.displayName + marker);
+      }
+      JList<String> list = new JList<>(model);
+      list.setFont(list.getFont().deriveFont(Font.PLAIN, 12f));
+      list.setFixedCellHeight(22);
+      JScrollPane scroll = new JScrollPane(list);
+      int h = Math.max(80, Math.min(480, stash.size() * 24 + 20));
+      scroll.setPreferredSize(new Dimension(380, h));
+      scroll.setBorder(BorderFactory.createEmptyBorder());
+
+      JLabel info = new JLabel("  " + stash.size() + " file"
+              + (stash.size() == 1 ? "" : "s")
+              + " in stash \u201C" + stash.name + "\u201D");
+      info.setBorder(new EmptyBorder(8, 4, 4, 4));
+      info.setFont(info.getFont().deriveFont(Font.BOLD, 11f));
+
+      JPanel btnRow = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+      JButton restoreBtn = new JButton("Restore");
+      JButton closeBtn = new JButton("Close");
+      btnRow.add(closeBtn);
+      btnRow.add(restoreBtn);
+      restoreBtn.addActionListener(e -> {
+         dlg.dispose();
+         restoreStash(stash);
+      });
+      closeBtn.addActionListener(e -> dlg.dispose());
+      dlg.getRootPane().setDefaultButton(restoreBtn);
+
+      dlg.add(info, BorderLayout.NORTH);
+      dlg.add(scroll, BorderLayout.CENTER);
+      dlg.add(btnRow, BorderLayout.SOUTH);
+      dlg.pack();
+      dlg.setLocationRelativeTo(this);
+      dlg.setVisible(true);
+   }
+
+   /**
+    * Returns the normalised absolute path for a TC (forward-slash separated),
+    * or {@code null} if the TC has no usable tooltip path.
+    *
+    * Strips HTML tags and trailing versioning annotations
+    * (e.g. " (read-only)", " [-/M]") the same way the rest of the class does.
+    */
+   private String resolveAbsPath(TopComponent tc) {
+      String tip = tc.getToolTipText();
+      if (tip == null || tip.trim().isEmpty()) {
+         return null;
+      }
+      String path = tip.replace('\\', '/')
+              .trim()
+              .replaceAll("<[^>]+>", "")
+              .trim();
+      // Strip trailing " (...)" or " [...]" versioning annotations
+      path = path.replaceAll("\\s+[\\(\\[][^\\)\\]]*[\\)\\]]\\s*$", "").trim();
+      return path.isEmpty() ? null : path;
    }
 }

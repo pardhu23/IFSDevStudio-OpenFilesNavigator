@@ -116,6 +116,15 @@ public final class PluginPrefs {
    private static final String INDEX_EXTENSIONS_DEFAULT
            = "entity,plsql,storage,views,utility,projection,plsvc,client,svc,fragment,utility,rdf,report,cre,api,apy,apv,ddlsource,dmlsource,xetrigger,clnsource";
 
+   private static final String NODE_STASHES = NODE_ROOT + "/stashes";
+   //Separator between the two fields (name vs path) in a stash item line.
+   private static final String ENTRY_SEP = "\u001E";
+
+   private static final String KEY_DEPLOY_ORDER = "deployOrder";
+   //Default deployment extension order.
+   private static final String DEPLOY_ORDER_DEFAULT
+           = "cre,cdb,api,apv,apy,entity,utility,ins,projection,fragment,plsvc,client";
+
    public static String getIndexExtensions() {
       return root().get(KEY_INDEX_EXTENSIONS, INDEX_EXTENSIONS_DEFAULT);
    }
@@ -715,5 +724,222 @@ public final class PluginPrefs {
          node.flush();
       } catch (BackingStoreException ignored) {
       }
+   }
+   // ── StashEntry / StashItem ────────────────────────────────────────────
+
+   /**
+    * A named stash: a snapshot of open editor files captured at stash time.
+    * Each item stores the display name and absolute path so files can be
+    * reopened later via the same strategy as {@code reopenClosedEntry}.
+    */
+   public static final class StashEntry {
+
+      public final String name;
+      public final java.util.List<StashItem> items;
+
+      public StashEntry(String name, java.util.List<StashItem> items) {
+         this.name = name != null ? name : "";
+         this.items = items != null ? items : new java.util.ArrayList<>();
+      }
+
+      public int size() {
+         return items.size();
+      }
+   }
+
+   /**
+    * One file within a stash.
+    */
+   public static final class StashItem {
+
+      public final String displayName;
+      public final String absolutePath;
+
+      public StashItem(String displayName, String absolutePath) {
+         this.displayName = displayName != null ? displayName : "";
+         this.absolutePath = absolutePath != null ? absolutePath : "";
+      }
+
+      public boolean hasPath() {
+         return !absolutePath.isEmpty();
+      }
+   }
+
+   // ── Stash ─────────────────────────────────────────────────────────────
+   /**
+    * Returns all stashes ordered by creation time (oldest first).
+    * The insertion order is preserved via an "_order" key that holds a
+    * ITEM_SEP-delimited list of stash names.
+    */
+   public static java.util.List<StashEntry> getStashes() {
+      java.util.List<StashEntry> result = new java.util.ArrayList<>();
+      try {
+         Preferences node = Preferences.userRoot().node(NODE_STASHES);
+         String orderRaw = node.get("_order", "");
+         if (orderRaw.isEmpty()) {
+            return result;
+         }
+         for (String name : orderRaw.split(CLOSED_SEP, -1)) {
+            name = name.trim();
+            if (name.isEmpty()) {
+               continue;
+            }
+            String raw = node.get(name, null);
+            if (raw == null) {
+               continue;
+            }
+            result.add(new StashEntry(name, parseStashItems(raw)));
+         }
+      } catch (Exception ignored) {
+      }
+      return result;
+   }
+
+   /**
+    * Saves a stash. Overwrites any existing stash with the same name.
+    * Each item is stored as "displayName\u001EabsolutePath", one per line.
+    */
+   public static void saveStash(String name, java.util.List<StashItem> items) {
+      if (name == null || name.trim().isEmpty()) {
+         return;
+      }
+      try {
+         Preferences node = Preferences.userRoot().node(NODE_STASHES);
+         StringBuilder sb = new StringBuilder();
+         for (StashItem item : items) {
+            if (sb.length() > 0) {
+               sb.append("\n");
+            }
+            sb.append(item.displayName.replace("\n", " "))
+                    .append(ENTRY_SEP)
+                    .append(item.absolutePath.replace("\n", " "));
+         }
+         node.put(name, sb.toString());
+
+         // Append to order list if new
+         String orderRaw = node.get("_order", "");
+         java.util.List<String> order = parseOrder(orderRaw);
+         if (!order.contains(name)) {
+            order.add(name);
+         }
+         node.put("_order", String.join(CLOSED_SEP, order));
+         flush(node);
+      } catch (Exception ignored) {
+      }
+   }
+
+   /**
+    * Deletes a stash by name.
+    */
+   public static void deleteStash(String name) {
+      try {
+         Preferences node = Preferences.userRoot().node(NODE_STASHES);
+         node.remove(name);
+         java.util.List<String> order = parseOrder(node.get("_order", ""));
+         order.remove(name);
+         node.put("_order", String.join(CLOSED_SEP, order));
+         flush(node);
+      } catch (Exception ignored) {
+      }
+   }
+
+   private static java.util.List<StashItem> parseStashItems(String raw) {
+      java.util.List<StashItem> items = new java.util.ArrayList<>();
+      if (raw == null || raw.isEmpty()) {
+         return items;
+      }
+      for (String line : raw.split("\n", -1)) {
+         int sep = line.indexOf(ENTRY_SEP);
+         if (sep < 0) {
+            if (!line.trim().isEmpty()) {
+               items.add(new StashItem(line.trim(), ""));
+            }
+         } else {
+            items.add(new StashItem(line.substring(0, sep), line.substring(sep + 1)));
+         }
+      }
+      return items;
+   }
+
+   private static java.util.List<String> parseOrder(String raw) {
+      java.util.List<String> order = new java.util.ArrayList<>();
+      if (raw == null || raw.isEmpty()) {
+         return order;
+      }
+      for (String s : raw.split(CLOSED_SEP, -1)) {
+         String trimmed = s.trim();
+         if (!trimmed.isEmpty()) {
+            order.add(trimmed);
+         }
+      }
+      return order;
+   }
+
+   /**
+    * Returns the comma-separated list of extensions defining deployment order.
+    * Extensions absent from the list are deployed last, in selection order.
+    */
+   public static String getDeployOrder() {
+      return root().get(KEY_DEPLOY_ORDER, DEPLOY_ORDER_DEFAULT);
+   }
+
+   public static void setDeployOrder(String csv) {
+      // Strip newlines introduced by JTextArea wrapping
+      if (csv == null) {
+         csv = "";
+      }
+      csv = csv.replace("\n", "").replace("\r", "").trim();
+      root().put(KEY_DEPLOY_ORDER, csv);
+      flush(root());
+   }
+
+   /**
+    * Sorts {@code targets} according to the configured deployment order.
+    *
+    * <p>
+    * Files whose extension appears in the order list are placed first,
+    * sorted by their position in the list. Files with equal extension rank
+    * preserve their original relative order (stable sort).
+    * Files whose extension is NOT in the list are appended at the end,
+    * in their original selection order.
+    *
+    * @param targets mutable list — sorted in-place and returned
+    * @param resolveExt function that maps a TopComponent to its lowercase extension
+    */
+   public static void sortByDeployOrder(
+           java.util.List<org.openide.windows.TopComponent> targets,
+           java.util.function.Function<org.openide.windows.TopComponent, String> resolveExt,
+           java.util.function.Function<org.openide.windows.TopComponent, String> resolveName) {
+
+      java.util.Map<String, Integer> rank = new java.util.LinkedHashMap<>();
+      int idx = 0;
+      for (String ext : getDeployOrder().split(",", -1)) {
+         ext = ext.trim().toLowerCase(java.util.Locale.ROOT);
+         if (!ext.isEmpty() && !rank.containsKey(ext)) {
+            rank.put(ext, idx++);
+         }
+      }
+      final int UNLISTED = rank.size();
+
+      targets.sort((a, b) -> {
+         int ra = rank.getOrDefault(resolveExt.apply(a), UNLISTED);
+         int rb = rank.getOrDefault(resolveExt.apply(b), UNLISTED);
+         if (ra != rb) {
+            return Integer.compare(ra, rb);
+         }
+         // Both unlisted → alphabetical by display name
+         if (ra == UNLISTED) {
+            String na = resolveName.apply(a);
+            if (na == null) {
+               na = "";
+            }
+            String nb = resolveName.apply(b);
+            if (nb == null) {
+               nb = "";
+            }
+            return na.compareToIgnoreCase(nb);
+         }
+         return 0; // same listed rank → stable
+      });
    }
 }
