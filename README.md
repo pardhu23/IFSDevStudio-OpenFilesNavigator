@@ -1,7 +1,7 @@
 # IFSDevStudio-OpenFilesNavigator
 A dockable **Open Files Navigator** panel for **IFS Developer Studio 18** (NetBeans 18).  
 Replaces the built-in tab strip with a resizable, searchable, collapsible panel with
-pinning, grouping, color tags, recently-closed history, and IFS-aware actions.
+pinning, grouping, color tags, stash/restore, recently-closed history, and IFS-aware actions.
 
 ---
 List View:
@@ -29,8 +29,20 @@ RMB Options:
 - **Notes** — attach a short note to any file; configurable display as tooltip, inline `✎` indicator, or subtitle row below the filename
 - **Recently Closed** — reopen accidentally closed files; auto-expands on close, auto-collapses after 5 seconds; history size configurable (1–20)
 - **IFS actions** — Generate Code, Generate & Deploy, Generate & Deploy with Dependents, Execute PL/SQL — triggered directly from the panel context menu
+- **Ordered multi-file deploy** — when deploying multiple files, they are processed sequentially in a configurable extension order (e.g. `.cre` → `.api` → `.plsql`); same order applies to Execute PL/SQL on multiple build files
+- **Customize This** — right-click a core file to create a `-Cust` customisation layer directly from the panel
 - **Build file detection** — generated files (paths containing `/build/`) shown italic in slate-blue; optionally grouped under a separate "Generated" section
 - **Close button** — × button on every file row in both list and tree views
+
+### Stash / Restore
+Press the 🗃 toolbar button to snapshot your current open files, close them all, and restore them later — like `git stash` for your editor tabs.
+
+- **Stash current files** — name the stash (defaults to timestamp), confirm the file list, then all files are closed and saved
+- **Stash selected files** — right-click any selection → *Stash selected files…* to stash only those files
+- **Restore** — reopen all files from a named stash; missing files are silently skipped with a summary
+- **Peek** — inspect the file list inside a stash before committing to restore
+- **Delete** — remove a stash when no longer needed
+- Multiple named stashes persist across IDE restarts
 
 ### Quick File Search (`Ctrl+P`)
 Press **Ctrl+P** anywhere in IFS Developer Studio to open a floating search popup.  
@@ -50,15 +62,16 @@ The 🔍 button in the Open Files panel toolbar also opens the dialog.
 | 4th | Generated / build output | `CustomerOrder.api` `GEN` |
 
 - Within each tier, **prefix matches rank above contains matches**
-- Results are **grouped by base name** — all `CustomerOrder` variants appear together before similar variants like `CustomerOrderLine` 
+- Results are **grouped by base name** — all `CustomerOrder` variants appear together before similar variants like `CustomerOrderLine`
 - The `-Cust` / `-Base` suffixes and file extensions are stripped before matching, so searching `CustomerOrder` finds `CustomerOrder-Cust.entity`, `CustomerOrder-Base.plsql`, etc.
+- Result rows show filename (bold) and relative path on two lines; full absolute path shown in tooltip on hover
 
 #### Source badges
 Files are tagged with a colour badge so you always know which layer a result comes from:
 
 | Badge | Colour | Meaning |
 |-------|--------|---------|
-| *(none)* | — | Your customisation file (`-Cust`) |
+| *(none)* | — | customisation file (`-Cust`) |
 | `CORE` | Purple | IFS core file (`project.ccs.corefiles` path) |
 | `GEN` | Orange | Generated / build output file |
 
@@ -98,11 +111,12 @@ Open via the ⚙ button in the Open Files panel toolbar.
 
 | Setting | Options | Description |
 |---------|---------|-------------|
-| **Quick Search extensions** | Comma-separated list | File extensions to index for Ctrl+P search |
+| **Quick Search extensions** | Comma-separated list (wrapping text area) | File extensions to index for Ctrl+P search |
 | **Note display** | Tooltip / Inline `✎` / Subtitle | How file notes appear in the list |
 | **Generated files** | Inline / Grouped | Show build files inline or under a "Generated" section |
 | **Tree grouping** | Folder path / IFS component | How ungrouped files are grouped in tree view |
 | **List sort order** | Alphabetical / Open order | Sort open files alphabetically or by the order they were opened |
+| **Generate & Deploy order** | Comma-separated extension list (wrapping text area) | Extension order for sequential multi-file deploy and Execute PL/SQL; unlisted extensions go last (A–Z). Default: `cre,cdb,api,apv,apy,entity,utility,ins,projection,fragment,plsvc,client` |
 | **Recently closed history** | 1–20 files | How many recently closed files to remember |
 | **Manage groups** | Add / Rename / Delete | Create and manage named file groups |
 
@@ -113,9 +127,9 @@ Open via the ⚙ button in the Open Files panel toolbar.
 ```
 OpenFilesNavigator/
 ├── src/com/pardha/openfiles/
-│   ├── OpenFilesTopComponent.java   # Main panel — all view logic
+│   ├── OpenFilesTopComponent.java   # Main panel — all view logic, stash, context menus
 │   ├── OpenFilesCellRenderer.java   # List cell renderer
-│   ├── PluginPrefs.java             # All persistence (java.util.prefs)
+│   ├── PluginPrefs.java             # All persistence (java.util.prefs) — includes stash, deploy order
 │   ├── FuzzyMatcher.java            # Fuzzy search utility (used by panel filter)
 │   ├── OpenFilesAction.java         # Menu action entry point
 │   ├── QuickFileSearchDialog.java   # Ctrl+P quick file search popup
