@@ -5,12 +5,16 @@ import java.awt.event.*;
 import java.io.File;
 import java.util.*;
 import java.util.List;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.RecursiveAction;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import javax.swing.border.LineBorder;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
 import org.netbeans.api.progress.ProgressHandle;
+import org.netbeans.api.project.Project;
+import org.netbeans.api.project.ui.OpenProjects;
 import org.openide.cookies.OpenCookie;
 import org.openide.filesystems.FileObject;
 import org.openide.filesystems.FileUtil;
@@ -20,56 +24,62 @@ import org.openide.windows.WindowManager;
 /**
  * Ctrl+P quick file search popup for IFS Developer Studio.
  *
- * <p>
- * Press Ctrl+P → floating dialog appears → type filename → Enter or click
- * to open. Escape dismisses.
- *
- * <p>
- * <b>Search behaviour</b>: strict substring/prefix matching only (no fuzzy).
- * Results are ranked by IFS naming convention:
- * <ol>
- * <li>-Cust files (your customisation layer) — highest</li>
- * <li>Plain core files (no suffix)</li>
- * <li>-Base files</li>
- * <li>GEN (build output) files — lowest</li>
- * </ol>
- * Within each tier, prefix matches rank above contains matches.
- *
- * <p>
- * <b>Caching strategy</b>
+ * <h3>Three-tier cache</h3>
  * <ul>
- * <li><b>Project layer</b> — scanned once per session, then monitored via a
- * {@code FileChangeListener}. Invalidated only when files are created or
- * deleted. Dialog always opens instantly showing the existing cache; any
- * rebuild runs silently in the background.</li>
- * <li><b>Core files</b> — scanned once per session, never rescanned
- * automatically. Multiple projects pointing to the same core root are
- * deduplicated via {@link #coreScannedRoots} — each unique path is walked
- * exactly once for the lifetime of the IDE session.</li>
+ *   <li><b>custCache</b>  — {@code workspace/} files. Incrementally updated via watcher.</li>
+ *   <li><b>buildCache</b> — {@code build/} files. Debounced rebuild after IFS code-gen bursts.</li>
+ *   <li><b>coreCache</b>  — {@code checkout/} files. Rebuilt only when core roots change.</li>
  * </ul>
- *
- * <p>
- * Both caches are {@code static} — they survive dialog close/reopen.
- *
- * <p>
- * <b>Background pre-indexing</b>: call {@link #ensureIndexed()} from
- * {@code OpenFilesTopComponent.componentOpened()} so the caches are warm
- * before the user first presses Ctrl+P.
  */
 public final class QuickFileSearchDialog extends JDialog {
 
-   // ── Singleton ──────────────────────────────────────────────────────────
+   // =========================================================================
+   // Enums / inner types
+   // =========================================================================
+
+   enum Source { PROJECT, CORE, GENERATED }
+
+   static final class FileEntry {
+      final String name;
+      final String relativePath;
+      final String absolutePath;
+      final Source source;
+      int score;
+
+      FileEntry(String name, String relativePath, String absolutePath, Source source) {
+         this.name         = name;
+         this.relativePath = relativePath;
+         this.absolutePath = absolutePath;
+         this.source       = source;
+      }
+   }
+
+   /** Resolved subdirectory roots for one open NetBeans project. */
+   private static final class ProjectRoots {
+      final String rootPath;     // forward-slash, no trailing slash
+      final File   workspaceDir; // may be null
+      final File   buildDir;     // may be null
+      final File   coreDir;      // from project.ccs.corefiles, may be null
+
+      ProjectRoots(String rootPath, File workspaceDir, File buildDir, File coreDir) {
+         this.rootPath     = rootPath;
+         this.workspaceDir = workspaceDir;
+         this.buildDir     = buildDir;
+         this.coreDir      = coreDir;
+      }
+   }
+
+   // =========================================================================
+   // Singleton
+   // =========================================================================
+
    private static QuickFileSearchDialog instance;
 
    public static void showDialog() {
       showDialog(null);
    }
 
-   /**
-    * Opens the dialog pre-filled with {@code prefill} text.
-    * Called by {@link FindApiFileAction} after converting an API name.
-    * Pass {@code null} or empty string for a blank search field.
-    */
+   /** Opens the dialog pre-filled with {@code prefill} (pass null for blank). */
    public static void showDialog(String prefill) {
       if (instance == null || !instance.isDisplayable()) {
          Frame owner = WindowManager.getDefault().getMainWindow();
@@ -78,134 +88,750 @@ public final class QuickFileSearchDialog extends JDialog {
       instance.openAndFocus(prefill);
    }
 
-   // ── IFS file extensions to index ──────────────────────────────────────
-   // User-configurable via Settings dialog. Stored as CSV in PluginPrefs.
-   // Falls back to PluginPrefs.INDEX_EXTENSIONS_DEFAULT if not set.
-   // ── IFS property key for core files path ──────────────────────────────
+   // =========================================================================
+   // Constants
+   // =========================================================================
+
+   private static final String CORE_FILES_PROP   = "project.ccs.corefiles";
+   private static final int    BUILD_DEBOUNCE_MS  = 3000;
+
+   // =========================================================================
+   // Cache state
+   // =========================================================================
+
+   // ── Cust cache (workspace/) ───────────────────────────────────────────────
+   private static List<FileEntry>  custCache         = null;
+   private static volatile boolean custCacheBuilding  = false;
+   private static volatile boolean custCacheStale     = true;
+
+   // ── Build cache (build/) ──────────────────────────────────────────────────
+   private static List<FileEntry>  buildCache         = null;
+   private static volatile boolean buildCacheBuilding  = false;
+
+   // ── Core cache (checkout/) ────────────────────────────────────────────────
+   private static List<FileEntry>  coreCache          = null;
+   private static volatile boolean coreCacheBuilding   = false;
+
    /**
-    * The only project property key used to locate the IFS Core Files checkout.
-    * Confirmed present in IFS Customisation Projects (nbproject/project.properties).
+    * Core root paths the current coreCache was built from.
+    * Compared against live project roots to detect staleness on project switch.
     */
-   private static final String CORE_FILES_PROP = "project.ccs.corefiles";
+   private static final Set<String> cachedCoreRoots  = new HashSet<>();
 
-   // ── Cache ──────────────────────────────────────────────────────────────
-   // Both caches are STATIC — survive dialog close/reopen for the whole IDE session.
-   // Core files (e.g. D:\IFS Workspace\...\checkout) — huge, change rarely.
-   // Built once per session, never invalidated automatically.
-   // coreScannedRoots ensures that multiple projects pointing to the same
-   // core directory are NEVER walked more than once per IDE session.
-   private static List<FileEntry> coreCache = null;
-   private static final Set<String> coreScannedRoots = new HashSet<>();
-   private static volatile boolean coreCacheBuilding = false;
-
-   // Project layer files — built once, then invalidated only when a file is
-   // created or deleted in the workspace (via FileChangeListener).
-   // The dialog always opens instantly showing the previous cache;
-   // a background rebuild runs silently when the stale flag is set.
-   private static List<FileEntry> custCache = null;
-   private static volatile boolean custCacheBuilding = false;
-   private static volatile boolean custCacheStale = true; // true = needs (re)build
-   private static org.openide.filesystems.FileChangeListener custWatcher = null;
-   private static String custWatchedRoot = null; // path currently being watched
-
-   // ── UI ─────────────────────────────────────────────────────────────────
-   private final JTextField searchField = new JTextField();
-   private final DefaultListModel<FileEntry> resultModel = new DefaultListModel<>();
-   private final JList<FileEntry> resultList = new JList<>(resultModel);
-   private final JLabel statusLabel = new JLabel(" ");
-
-   // ── Data ───────────────────────────────────────────────────────────────
-   enum Source {
-      PROJECT, CORE, GENERATED
-   }
-
-   static final class FileEntry {
-
-      final String name;         // e.g. "CustomerOrder-Cust.entity"
-      final String relativePath; // e.g. "order/model/order/CustomerOrder-Cust.entity"
-      final String absolutePath;
-      final Source source;
-      int score;                 // set during each filter pass
-
-      FileEntry(String name, String relativePath, String absolutePath, Source source) {
-         this.name = name;
-         this.relativePath = relativePath;
-         this.absolutePath = absolutePath;
-         this.source = source;
-      }
-   }
-
-   // ── Background pre-indexing ────────────────────────────────────────────
    /**
-    * Starts background indexing of both caches immediately, without opening
-    * the dialog. Call this from {@code OpenFilesTopComponent.componentOpened()}
-    * so that Ctrl+P is instant even on the first press of the session.
-    *
-    * <p>
-    * Safe to call multiple times — each cache is only built once.
-    * Does nothing if both caches are already built or currently building.
+    * Snapshot of roots being built in the active core-indexer thread.
+    * Used to detect a project change that arrives mid-build.
+    */
+   private static Set<String>       pendingCoreRoots = null;
+
+   // ── Merged cache ──────────────────────────────────────────────────────────
+   /** Pre-merged view of all three caches. Re-used on every keystroke — no per-keypress copy. */
+   private static volatile List<FileEntry> mergedCache      = Collections.emptyList();
+   private static volatile boolean         mergedCacheStale = true;
+
+   /** Wall-clock start time for the current indexing run — used in total-time log. */
+   private static long indexingStartedAt = 0;
+
+   // ── Watchers ──────────────────────────────────────────────────────────────
+   private static org.openide.filesystems.FileChangeListener custWatcher   = null;
+   private static org.openide.filesystems.FileChangeListener buildWatcher  = null;
+
+   private static final List<String>      custWatchedRoots   = new ArrayList<>();
+   private static final List<String>      buildWatchedRoots  = new ArrayList<>();
+   private static       javax.swing.Timer buildDebounceTimer = null;
+
+   /** Guards incremental add/remove mutations to custCache from watcher callbacks. */
+   private static final Object CACHE_LOCK = new Object();
+
+   // ── Shared ForkJoinPool ───────────────────────────────────────────────────
+   /**
+    * Created once and reused across all scans.
+    * Avoids ~200ms thread-creation overhead on Windows per walkParallel call.
+    */
+   private static final ForkJoinPool WALK_POOL = new ForkJoinPool(
+           Math.min(4, Runtime.getRuntime().availableProcessors()));
+
+   // =========================================================================
+   // Public API
+   // =========================================================================
+
+   /**
+    * Pre-indexes all three caches in the background.
+    * Call from {@code OpenFilesTopComponent.componentOpened()}.
+    * Safe to call multiple times — skips caches already built or building.
     */
    public static void ensureIndexed() {
-      System.err.println("[QuickFileSearch] ensureIndexed called — "
-              + "custReady=" + (custCache != null && !custCacheStale)
-              + " coreReady=" + (coreCache != null));
-      if (custCache == null && !custCacheBuilding) {
-         buildCustCacheAsyncStatic();
-      } else if (custCacheStale && !custCacheBuilding) {
-         buildCustCacheAsyncStatic();
+      indexingStartedAt = System.currentTimeMillis();
+      System.err.println("[QuickFileSearch] ensureIndexed — "
+              + "cust="   + cacheState(custCache,  custCacheBuilding,  custCacheStale)
+              + " build=" + cacheState(buildCache, buildCacheBuilding, false)
+              + " core="  + cacheState(coreCache,  coreCacheBuilding,  false));
+
+      if ((custCache == null || custCacheStale) && !custCacheBuilding) {
+         buildCustCacheAsync(null);
+      }
+      if (buildCache == null && !buildCacheBuilding) {
+         buildBuildCacheAsync(null);
       }
       if (coreCache == null && !coreCacheBuilding) {
-         buildCoreCacheAsyncStatic();
+         buildCoreCacheAsync(null);
       }
    }
 
    /**
-    * Marks the project cache as stale and clears it so the next
-    * {@code ensureIndexed()} or Ctrl+P triggers a full rebuild.
-    * Called from the Settings dialog when the indexed extensions change.
+    * Seeds the initial core-roots snapshot before the first ensureIndexed() call.
+    * Call once from OpenFilesTopComponent.componentOpened(), before ensureIndexed().
     */
-   static void markCustCacheStale() {
-      custCacheStale = true;
-      custCache = null;
+   public static void seedInitialCoreRoots() {
+      if (cachedCoreRoots.isEmpty()) {
+         cachedCoreRoots.addAll(computeActiveCoreRoots());
+         System.err.println("[QuickFileSearch] Initial core roots: " + cachedCoreRoots);
+      }
    }
 
-   // ── Construction ───────────────────────────────────────────────────────
+   /**
+    * Called by OpenFilesTopComponent when the set of open projects changes.
+    * Always rebuilds cust + build caches. Rebuilds core only when roots differ.
+    */
+   public static void onOpenProjectsChanged() {
+      Set<String> neededRoots = computeActiveCoreRoots();
+
+      custCache        = null;
+      custCacheStale   = true;
+      buildCache       = null;
+      mergedCacheStale = true;
+      unregisterWatchers();
+
+      if (!custCacheBuilding)  buildCustCacheAsync(null);
+      if (!buildCacheBuilding) buildBuildCacheAsync(null);
+
+      if (neededRoots.equals(cachedCoreRoots)) {
+         System.err.println("[QuickFileSearch] Core roots unchanged — skipping core rebuild");
+         return;
+      }
+
+      System.err.println("[QuickFileSearch] Core roots changed."
+              + " Old=" + cachedCoreRoots + " New=" + neededRoots);
+
+      coreCache        = null;
+      mergedCacheStale = true;
+      cachedCoreRoots.clear();
+      cachedCoreRoots.addAll(neededRoots);
+
+      if (!coreCacheBuilding) buildCoreCacheAsync(null);
+   }
+
+   /**
+    * Wipes all three caches and rebuilds from scratch.
+    * onComplete is called on the EDT when all three finish. Pass null if unneeded.
+    */
+   public static void refreshAllCachesStatic(Runnable onComplete) {
+      unregisterWatchers();
+      custCache        = null;
+      custCacheStale   = true;
+      buildCache       = null;
+      coreCache        = null;
+      mergedCache      = Collections.emptyList();
+      mergedCacheStale = true;
+      cachedCoreRoots.clear();
+      cachedCoreRoots.addAll(computeActiveCoreRoots());
+      indexingStartedAt = System.currentTimeMillis();
+
+      int[] pending = {3};
+      Runnable onOneDone = () -> {
+         pending[0]--;
+         if (pending[0] == 0 && onComplete != null) {
+            onComplete.run();
+         }
+      };
+
+      buildCustCacheAsync(onOneDone);
+      buildBuildCacheAsync(onOneDone);
+      buildCoreCacheAsync(onOneDone);
+   }
+
+   /** Marks cust + build caches stale. Called from Settings when indexed extensions change. */
+   static void markCustCacheStale() {
+      custCacheStale   = true;
+      custCache        = null;
+      buildCache       = null;
+      mergedCacheStale = true;
+   }
+
+   // =========================================================================
+   // Cache builders
+   // =========================================================================
+
+   private static void buildCustCacheAsync(Runnable onDone) {
+      custCacheBuilding = true;
+      custCacheStale    = false;
+
+      new Thread(() -> {
+         long           start        = System.currentTimeMillis();
+         ProgressHandle ph           = ProgressHandle.createHandle("Open Files: Indexing workspace\u2026");
+         ph.start();
+         try {
+            Set<String>        exts          = PluginPrefs.getIndexExtensionSet();
+            List<ProjectRoots> projectRoots  = collectProjectRoots();
+            List<FileEntry>    entries       = new ArrayList<>();
+            List<String>       workspaceDirs = new ArrayList<>();
+            List<String>       buildDirs     = new ArrayList<>();
+
+            for (ProjectRoots pr : projectRoots) {
+               if (pr.workspaceDir != null && pr.workspaceDir.isDirectory()) {
+                  walkParallel(pr.workspaceDir, pr.rootPath, entries, Source.PROJECT, exts);
+                  workspaceDirs.add(pr.workspaceDir.getAbsolutePath());
+               }
+               if (pr.buildDir != null && pr.buildDir.isDirectory()) {
+                  buildDirs.add(pr.buildDir.getAbsolutePath());
+               }
+            }
+
+            System.err.println("[QuickFileSearch] Cust scan done: "
+                    + entries.size() + " files in "
+                    + (System.currentTimeMillis() - start) + "ms");
+
+            SwingUtilities.invokeLater(() -> {
+               custCache         = new ArrayList<>(entries);
+               custCacheBuilding = false;
+               registerCustWatcher(workspaceDirs, exts);
+               registerBuildWatcher(buildDirs);
+               rebuildMergedCache();
+               if (onDone != null) onDone.run();
+            });
+         } catch (Exception ex) {
+            System.err.println("[QuickFileSearch] Cust scan failed: " + ex);
+            SwingUtilities.invokeLater(() -> {
+               custCacheBuilding = false;
+               custCacheStale    = true;
+               if (onDone != null) onDone.run();
+            });
+         } finally {
+            ph.finish();
+         }
+      }, "QuickFileSearch-CustIndexer").start();
+   }
+
+   private static void buildBuildCacheAsync(Runnable onDone) {
+      buildCacheBuilding = true;
+
+      new Thread(() -> {
+         long           start = System.currentTimeMillis();
+         ProgressHandle ph    = ProgressHandle.createHandle("Open Files: Indexing build output\u2026");
+         ph.start();
+         try {
+            Set<String>        exts         = PluginPrefs.getIndexExtensionSet();
+            List<ProjectRoots> projectRoots = collectProjectRoots();
+            List<FileEntry>    entries      = new ArrayList<>();
+
+            for (ProjectRoots pr : projectRoots) {
+               if (pr.buildDir != null && pr.buildDir.isDirectory()) {
+                  walkParallel(pr.buildDir, pr.rootPath, entries, Source.GENERATED, exts);
+               }
+            }
+
+            System.err.println("[QuickFileSearch] Build scan done: "
+                    + entries.size() + " files in "
+                    + (System.currentTimeMillis() - start) + "ms");
+
+            SwingUtilities.invokeLater(() -> {
+               buildCache         = new ArrayList<>(entries);
+               buildCacheBuilding = false;
+               rebuildMergedCache();
+               if (onDone != null) onDone.run();
+            });
+         } catch (Exception ex) {
+            System.err.println("[QuickFileSearch] Build scan failed: " + ex);
+            SwingUtilities.invokeLater(() -> {
+               buildCacheBuilding = false;
+               if (onDone != null) onDone.run();
+            });
+         } finally {
+            ph.finish();
+         }
+      }, "QuickFileSearch-BuildIndexer").start();
+   }
+
+   private static void buildCoreCacheAsync(Runnable onDone) {
+      coreCacheBuilding = true;
+      Set<String> snapshotRoots = new HashSet<>(cachedCoreRoots);
+      pendingCoreRoots = snapshotRoots;
+
+      new Thread(() -> {
+         long           start = System.currentTimeMillis();
+         ProgressHandle ph    = ProgressHandle.createHandle("Open Files: Indexing core files\u2026");
+         ph.start();
+         try {
+            Set<String>     exts    = PluginPrefs.getIndexExtensionSet();
+            List<FileEntry> entries = new ArrayList<>();
+
+            for (String rootPath : snapshotRoots) {
+               File rootDir = new File(rootPath);
+               if (rootDir.isDirectory()) {
+                  walkParallel(rootDir, rootPath, entries, Source.CORE, exts);
+               }
+            }
+
+            System.err.println("[QuickFileSearch] Core scan done: "
+                    + entries.size() + " files from " + snapshotRoots
+                    + " in " + (System.currentTimeMillis() - start) + "ms");
+
+            SwingUtilities.invokeLater(() -> {
+               // If roots changed again while building, restart
+               if (!snapshotRoots.equals(cachedCoreRoots)) {
+                  System.err.println("[QuickFileSearch] Core roots changed during build — restarting");
+                  coreCacheBuilding = false;
+                  pendingCoreRoots  = null;
+                  buildCoreCacheAsync(onDone);
+                  return;
+               }
+               coreCache         = entries;
+               coreCacheBuilding = false;
+               pendingCoreRoots  = null;
+               rebuildMergedCache();
+               if (onDone != null) onDone.run();
+            });
+         } catch (Exception ex) {
+            System.err.println("[QuickFileSearch] Core scan failed: " + ex);
+            SwingUtilities.invokeLater(() -> {
+               coreCacheBuilding = false;
+               pendingCoreRoots  = null;
+               if (onDone != null) onDone.run();
+            });
+         } finally {
+            ph.finish();
+         }
+      }, "QuickFileSearch-CoreIndexer").start();
+   }
+
+   // =========================================================================
+   // Merged cache
+   // =========================================================================
+
+   /** Rebuilds mergedCache from all three caches. Must be called on EDT. */
+   private static void rebuildMergedCache() {
+      int cap = (custCache  != null ? custCache.size()  : 0)
+              + (buildCache != null ? buildCache.size() : 0)
+              + (coreCache  != null ? coreCache.size()  : 0);
+
+      List<FileEntry> merged = new ArrayList<>(cap);
+      if (custCache  != null) merged.addAll(custCache);
+      if (buildCache != null) merged.addAll(buildCache);
+      if (coreCache  != null) merged.addAll(coreCache);
+
+      mergedCache      = merged;
+      mergedCacheStale = false;
+
+      if (custCache != null && buildCache != null && coreCache != null) {
+         System.err.println("[QuickFileSearch] All caches ready — total: "
+                 + (System.currentTimeMillis() - indexingStartedAt) + "ms | "
+                 + "cust="    + custCache.size()
+                 + " build="  + buildCache.size()
+                 + " core="   + coreCache.size()
+                 + " merged=" + mergedCache.size());
+      }
+
+      if (instance != null && instance.isVisible()) {
+         instance.onQueryChanged();
+      }
+   }
+
+   // =========================================================================
+   // Watchers
+   // =========================================================================
+
+   /**
+    * Registers an incremental watcher on each workspace/ directory.
+    * File created/deleted → single entry added/removed, no full rebuild.
+    */
+   private static void registerCustWatcher(List<String> workspaceDirs, Set<String> exts) {
+      unregisterCustWatcher();
+      if (workspaceDirs.isEmpty()) return;
+
+      custWatcher = new org.openide.filesystems.FileChangeAdapter() {
+         @Override
+         public void fileDataCreated(org.openide.filesystems.FileEvent fe) {
+            java.io.File f = FileUtil.toFile(fe.getFile());
+            if (f == null) return;
+            String ext = getExtension(f.getName());
+            if (!exts.contains(ext)) return;
+
+            String abs      = f.getAbsolutePath().replace('\\', '/');
+            String rootPath = findWatchedRoot(abs, custWatchedRoots);
+            String rel      = rootPath != null && abs.startsWith(rootPath)
+                    ? abs.substring(rootPath.length() + 1) : abs;
+
+            FileEntry entry = new FileEntry(f.getName(), rel, abs, Source.PROJECT);
+            synchronized (CACHE_LOCK) {
+               if (custCache != null) custCache.add(entry);
+            }
+            SwingUtilities.invokeLater(() -> {
+               mergedCacheStale = true;
+               rebuildMergedCache();
+            });
+         }
+
+         @Override
+         public void fileDeleted(org.openide.filesystems.FileEvent fe) {
+            java.io.File f = FileUtil.toFile(fe.getFile());
+            if (f == null) return;
+            String abs = f.getAbsolutePath().replace('\\', '/');
+            synchronized (CACHE_LOCK) {
+               if (custCache != null) custCache.removeIf(e -> e.absolutePath.equals(abs));
+            }
+            SwingUtilities.invokeLater(() -> {
+               mergedCacheStale = true;
+               rebuildMergedCache();
+            });
+         }
+      };
+
+      for (String dirPath : workspaceDirs) {
+         try {
+            FileObject fo = FileUtil.toFileObject(FileUtil.normalizeFile(new File(dirPath)));
+            if (fo != null) {
+               fo.addRecursiveListener(custWatcher);
+               custWatchedRoots.add(dirPath.replace('\\', '/'));
+               System.err.println("[QuickFileSearch] Watching workspace: " + dirPath);
+            }
+         } catch (Exception ex) {
+            System.err.println("[QuickFileSearch] custWatcher register failed: " + ex);
+         }
+      }
+   }
+
+   /**
+    * Registers a debounced watcher on each build/ directory.
+    * IFS code-gen bursts are coalesced into a single rebuild after
+    * BUILD_DEBOUNCE_MS ms of silence.
+    */
+   private static void registerBuildWatcher(List<String> buildDirs) {
+      unregisterBuildWatcher();
+      if (buildDirs.isEmpty()) return;
+
+      buildWatcher = new org.openide.filesystems.FileChangeAdapter() {
+         @Override public void fileDataCreated(org.openide.filesystems.FileEvent fe)   { debounceBuildRebuild(); }
+         @Override public void fileFolderCreated(org.openide.filesystems.FileEvent fe) { debounceBuildRebuild(); }
+         @Override public void fileDeleted(org.openide.filesystems.FileEvent fe)       { debounceBuildRebuild(); }
+      };
+
+      for (String dirPath : buildDirs) {
+         try {
+            FileObject fo = FileUtil.toFileObject(FileUtil.normalizeFile(new File(dirPath)));
+            if (fo != null) {
+               fo.addRecursiveListener(buildWatcher);
+               buildWatchedRoots.add(dirPath.replace('\\', '/'));
+               System.err.println("[QuickFileSearch] Watching build: " + dirPath);
+            }
+         } catch (Exception ex) {
+            System.err.println("[QuickFileSearch] buildWatcher register failed: " + ex);
+         }
+      }
+   }
+
+   /** Restarts a debounce timer on every build-directory event. */
+   private static void debounceBuildRebuild() {
+      SwingUtilities.invokeLater(() -> {
+         if (buildDebounceTimer != null) {
+            buildDebounceTimer.restart();
+         } else {
+            buildDebounceTimer = new javax.swing.Timer(BUILD_DEBOUNCE_MS, e -> {
+               buildDebounceTimer = null;
+               if (!buildCacheBuilding) {
+                  System.err.println("[QuickFileSearch] Build debounce fired — rebuilding");
+                  buildBuildCacheAsync(null);
+               }
+            });
+            buildDebounceTimer.setRepeats(false);
+            buildDebounceTimer.start();
+         }
+      });
+   }
+
+   private static void unregisterCustWatcher() {
+      if (custWatcher == null) return;
+      for (String path : custWatchedRoots) {
+         try {
+            FileObject fo = FileUtil.toFileObject(FileUtil.normalizeFile(new File(path)));
+            if (fo != null) fo.removeRecursiveListener(custWatcher);
+         } catch (Exception ignored) {}
+      }
+      custWatcher = null;
+      custWatchedRoots.clear();
+   }
+
+   private static void unregisterBuildWatcher() {
+      if (buildWatcher == null) return;
+      for (String path : buildWatchedRoots) {
+         try {
+            FileObject fo = FileUtil.toFileObject(FileUtil.normalizeFile(new File(path)));
+            if (fo != null) fo.removeRecursiveListener(buildWatcher);
+         } catch (Exception ignored) {}
+      }
+      buildWatcher = null;
+      buildWatchedRoots.clear();
+   }
+
+   private static void unregisterWatchers() {
+      unregisterCustWatcher();
+      unregisterBuildWatcher();
+      if (buildDebounceTimer != null) {
+         buildDebounceTimer.stop();
+         buildDebounceTimer = null;
+      }
+   }
+
+   // =========================================================================
+   // Project root helpers
+   // =========================================================================
+
+   private static List<ProjectRoots> collectProjectRoots() {
+      List<ProjectRoots> result = new ArrayList<>();
+      Set<String>        seen   = new HashSet<>();
+      try {
+         for (Project project : OpenProjects.getDefault().getOpenProjects()) {
+            FileObject projectDir = project.getProjectDirectory();
+            if (projectDir == null) continue;
+            File root = FileUtil.toFile(projectDir);
+            if (root == null || !root.isDirectory()) continue;
+
+            String rootPath = root.getAbsolutePath().replace('\\', '/');
+            if (!seen.add(rootPath)) continue;
+
+            File workspace = new File(root, "workspace");
+
+            // Skip non-IFS projects (e.g. the plugin project itself has no workspace/)
+            if (!workspace.isDirectory()) {
+               System.err.println("[QuickFileSearch] Skipping non-IFS project: " + rootPath);
+               continue;
+            }
+
+            File build = new File(root, "build");
+            File core  = readCoreFilesRoot(root);
+
+            result.add(new ProjectRoots(
+                    rootPath,
+                    workspace,
+                    build.isDirectory() ? build : null,
+                    core));
+         }
+      } catch (Exception ex) {
+         System.err.println("[QuickFileSearch] collectProjectRoots: " + ex);
+      }
+      return result;
+   }
+
+   /** Returns the set of core root paths across all open projects (deduplicated). */
+   private static Set<String> computeActiveCoreRoots() {
+      Set<String> roots = new HashSet<>();
+      try {
+         for (Project project : OpenProjects.getDefault().getOpenProjects()) {
+            FileObject projectDir = project.getProjectDirectory();
+            if (projectDir == null) continue;
+            File projRoot = FileUtil.toFile(projectDir);
+            if (projRoot == null) continue;
+            File coreRoot = readCoreFilesRoot(projRoot);
+            if (coreRoot != null && coreRoot.isDirectory()) {
+               roots.add(coreRoot.getAbsolutePath());
+            }
+         }
+      } catch (Exception ex) {
+         System.err.println("[QuickFileSearch] computeActiveCoreRoots: " + ex);
+      }
+      return roots;
+   }
+
+   /**
+    * Reads project.ccs.corefiles from nbproject/project.properties.
+    * Returns null when absent or path does not exist.
+    */
+   private static File readCoreFilesRoot(File projectDir) {
+      File[] candidates = {
+         new File(projectDir, "nbproject/project.properties"),
+         new File(projectDir, "project.properties")
+      };
+      for (File propsFile : candidates) {
+         if (!propsFile.exists()) continue;
+         java.util.Properties props = new java.util.Properties();
+         try (java.io.FileInputStream fis = new java.io.FileInputStream(propsFile)) {
+            props.load(fis);
+         } catch (Exception ex) {
+            System.err.println("[QuickFileSearch] Could not read " + propsFile + ": " + ex);
+            continue;
+         }
+         String val = props.getProperty(CORE_FILES_PROP);
+         if (val == null || val.trim().isEmpty()) continue;
+         File f = new File(val.trim());
+         if (!f.isAbsolute()) f = new File(projectDir, val.trim());
+         f = FileUtil.normalizeFile(f);
+         if (f.exists() && f.isDirectory()) return f;
+         System.err.println("[QuickFileSearch] Core path invalid: " + f);
+      }
+      return null;
+   }
+
+   // =========================================================================
+   // Parallel directory walker
+   // =========================================================================
+
+   /**
+    * Walks dir in parallel using the shared WALK_POOL.
+    * exts is passed in once — not re-fetched per file.
+    * Uses Collections.synchronizedList (O(n) adds) instead of
+    * CopyOnWriteArrayList (O(n²) on large trees).
+    */
+   private static void walkParallel(File dir, String rootPath,
+           List<FileEntry> result, Source source, Set<String> exts) {
+      List<FileEntry> concurrent = Collections.synchronizedList(new ArrayList<>());
+      String normRoot = rootPath.replace('\\', '/');
+      WALK_POOL.invoke(new WalkTask(dir, normRoot, concurrent, source, exts));
+      result.addAll(concurrent);
+   }
+
+   private static final class WalkTask extends RecursiveAction {
+
+      private final File            dir;
+      private final String          rootPath;
+      private final List<FileEntry> result;
+      private final Source          source;
+      private final Set<String>     exts;
+
+      WalkTask(File dir, String rootPath, List<FileEntry> result,
+               Source source, Set<String> exts) {
+         this.dir      = dir;
+         this.rootPath = rootPath;
+         this.result   = result;
+         this.source   = source;
+         this.exts     = exts;
+      }
+
+      @Override
+      protected void compute() {
+         File[] children = dir.listFiles();
+         if (children == null) return;
+
+         List<WalkTask> subTasks = new ArrayList<>();
+
+         for (File f : children) {
+            if (f.isHidden()) continue;
+            String name = f.getName();
+
+            if (f.isDirectory()) {
+               if (shouldSkipDir(name, f)) continue;
+               Source childSource = (source == Source.PROJECT && name.equals("build"))
+                       ? Source.GENERATED : source;
+               subTasks.add(new WalkTask(f, rootPath, result, childSource, exts));
+            } else {
+               String ext = getExtension(name);
+               if (!exts.contains(ext)) continue;
+               String abs = f.getAbsolutePath().replace('\\', '/');
+               String rel = abs.startsWith(rootPath)
+                       ? abs.substring(rootPath.length() + 1) : abs;
+               result.add(new FileEntry(name, rel, abs, source));
+            }
+         }
+
+         if (!subTasks.isEmpty()) invokeAll(subTasks);
+      }
+   }
+
+   private static boolean shouldSkipDir(String name, File dir) {
+      switch (name) {
+         case ".git": case ".svn": case "node_modules":
+         case "target": case ".idea": case "nbproject":
+            return true;
+      }
+      if (name.equals("server") && isModuleChild(dir)) return true;
+      return false;
+   }
+
+   /** Returns true when dir is a direct child of workspace/ or checkout/. */
+   private static boolean isModuleChild(File dir) {
+      File module  = dir.getParentFile();
+      if (module == null) return false;
+      File ifsRoot = module.getParentFile();
+      if (ifsRoot == null) return false;
+      String rootName = ifsRoot.getName().toLowerCase(Locale.ROOT);
+      return rootName.equals("workspace") || rootName.equals("checkout");
+   }
+
+   // =========================================================================
+   // Utilities
+   // =========================================================================
+
+   private static String getExtension(String fileName) {
+      int dot = fileName.lastIndexOf('.');
+      return dot < 0 ? "" : fileName.substring(dot + 1).toLowerCase(Locale.ROOT);
+   }
+
+   private static String findWatchedRoot(String absPath, List<String> roots) {
+      for (String root : roots) {
+         if (absPath.startsWith(root)) return root;
+      }
+      return null;
+   }
+
+   private static String getBaseName(String fileName) {
+      String base  = fileName.contains(".")
+              ? fileName.substring(0, fileName.lastIndexOf('.')) : fileName;
+      String lower = base.toLowerCase(Locale.ROOT);
+      if (lower.endsWith("-cust") || lower.endsWith("-base")) {
+         base = base.substring(0, base.length() - 5);
+      }
+      return base;
+   }
+
+   private static String cacheState(List<?> cache, boolean building, boolean stale) {
+      if (building)      return "building";
+      if (cache == null) return "null";
+      if (stale)         return "stale(" + cache.size() + ")";
+      return "ok(" + cache.size() + ")";
+   }
+
+   // =========================================================================
+   // UI fields
+   // =========================================================================
+
+   private final JTextField              searchField = new JTextField();
+   private final DefaultListModel<FileEntry> resultModel = new DefaultListModel<>();
+   private final JList<FileEntry>        resultList  = new JList<>(resultModel);
+   private final JLabel                  statusLabel = new JLabel(" ");
+
+   // =========================================================================
+   // Construction
+   // =========================================================================
+
    private QuickFileSearchDialog(Frame owner) {
-      super(owner, false); // non-modal so IDE stays responsive
+      super(owner, false); // non-modal
       setUndecorated(true);
       buildUI();
       pack();
       setSize(560, 420);
       centerOnOwner(owner);
 
-      // Close on focus loss (click outside the dialog)
       addWindowFocusListener(new WindowAdapter() {
          @Override
          public void windowLostFocus(WindowEvent e) {
-            Component opposite = e.getOppositeWindow();
-            if (opposite != QuickFileSearchDialog.this) {
-               closeDialog();
-            }
+            if (e.getOppositeWindow() != QuickFileSearchDialog.this) closeDialog();
          }
       });
 
-      // Escape to close
       getRootPane().registerKeyboardAction(
               e -> closeDialog(),
               KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0),
-              JComponent.WHEN_IN_FOCUSED_WINDOW
-      );
+              JComponent.WHEN_IN_FOCUSED_WINDOW);
    }
 
    private void buildUI() {
       JPanel root = new JPanel(new BorderLayout(0, 0));
-      root.setBorder(new LineBorder(UIManager.getColor("Separator.foreground") != null
+      root.setBorder(new LineBorder(
+              UIManager.getColor("Separator.foreground") != null
               ? UIManager.getColor("Separator.foreground")
               : new Color(160, 160, 160), 1));
       root.setBackground(UIManager.getColor("Panel.background"));
       setContentPane(root);
 
-      // ── Search field ──────────────────────────────────────────────────
+      // ── Top bar: icon + search field + refresh button ─────────────────
       JPanel topPanel = new JPanel(new BorderLayout(6, 0));
       topPanel.setBorder(new EmptyBorder(8, 10, 8, 10));
       topPanel.setOpaque(false);
@@ -220,6 +846,16 @@ public final class QuickFileSearchDialog extends JDialog {
       searchField.setOpaque(false);
       topPanel.add(searchField, BorderLayout.CENTER);
 
+      JButton refreshBtn = new JButton("\u21BB"); // ↻
+      refreshBtn.setFocusable(false);
+      refreshBtn.setFont(refreshBtn.getFont().deriveFont(13f));
+      refreshBtn.setBorder(BorderFactory.createEmptyBorder(0, 6, 0, 2));
+      refreshBtn.setOpaque(false);
+      refreshBtn.setContentAreaFilled(false);
+      refreshBtn.setToolTipText("Refresh file index (clears all caches)");
+      refreshBtn.addActionListener(e -> refreshAllCaches());
+      topPanel.add(refreshBtn, BorderLayout.EAST);
+
       root.add(topPanel, BorderLayout.NORTH);
 
       // ── Results list ──────────────────────────────────────────────────
@@ -228,14 +864,11 @@ public final class QuickFileSearchDialog extends JDialog {
       resultList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
       resultList.setBackground(UIManager.getColor("List.background"));
       resultList.setBorder(new EmptyBorder(2, 0, 2, 0));
-      resultList.setFocusable(false); // keyboard stays in searchField
-
+      resultList.setFocusable(false);
       resultList.addMouseListener(new MouseAdapter() {
          @Override
          public void mouseClicked(MouseEvent e) {
-            if (SwingUtilities.isLeftMouseButton(e)) {
-               openSelected();
-            }
+            if (SwingUtilities.isLeftMouseButton(e)) openSelected();
          }
       });
 
@@ -258,59 +891,39 @@ public final class QuickFileSearchDialog extends JDialog {
       body.add(center, BorderLayout.CENTER);
       root.add(body, BorderLayout.CENTER);
 
-      // ── Document listener (live filter) ───────────────────────────────
+      // ── Document listener — live filter ───────────────────────────────
       searchField.getDocument().addDocumentListener(new DocumentListener() {
-         @Override
-         public void insertUpdate(DocumentEvent e) {
-            onQueryChanged();
-         }
-
-         @Override
-         public void removeUpdate(DocumentEvent e) {
-            onQueryChanged();
-         }
-
-         @Override
-         public void changedUpdate(DocumentEvent e) {
-            onQueryChanged();
-         }
+         @Override public void insertUpdate(DocumentEvent e)  { onQueryChanged(); }
+         @Override public void removeUpdate(DocumentEvent e)  { onQueryChanged(); }
+         @Override public void changedUpdate(DocumentEvent e) { onQueryChanged(); }
       });
 
       // ── Keyboard navigation ───────────────────────────────────────────
       searchField.addKeyListener(new KeyAdapter() {
          @Override
          public void keyPressed(KeyEvent e) {
-            int sel = resultList.getSelectedIndex();
+            int sel  = resultList.getSelectedIndex();
             int size = resultModel.getSize();
             switch (e.getKeyCode()) {
                case KeyEvent.VK_DOWN:
-                  if (sel < size - 1) {
-                     resultList.setSelectedIndex(sel + 1);
-                     resultList.ensureIndexIsVisible(sel + 1);
-                  }
-                  e.consume();
-                  break;
+                  if (sel < size - 1) { resultList.setSelectedIndex(sel + 1); resultList.ensureIndexIsVisible(sel + 1); }
+                  e.consume(); break;
                case KeyEvent.VK_UP:
-                  if (sel > 0) {
-                     resultList.setSelectedIndex(sel - 1);
-                     resultList.ensureIndexIsVisible(sel - 1);
-                  }
-                  e.consume();
-                  break;
+                  if (sel > 0) { resultList.setSelectedIndex(sel - 1); resultList.ensureIndexIsVisible(sel - 1); }
+                  e.consume(); break;
                case KeyEvent.VK_ENTER:
-                  openSelected();
-                  e.consume();
-                  break;
+                  openSelected(); e.consume(); break;
                case KeyEvent.VK_ESCAPE:
-                  closeDialog();
-                  e.consume();
-                  break;
+                  closeDialog();  e.consume(); break;
             }
          }
       });
    }
 
-   // ── Open / close ───────────────────────────────────────────────────────
+   // =========================================================================
+   // Open / close / refresh
+   // =========================================================================
+
    private void openAndFocus(String prefill) {
       searchField.setText(prefill != null ? prefill : "");
       resultModel.clear();
@@ -321,537 +934,64 @@ public final class QuickFileSearchDialog extends JDialog {
       if (prefill != null && !prefill.isEmpty()) {
          searchField.setCaretPosition(prefill.length());
       }
-      ensureCache();
+      ensureCacheForDialog();
    }
 
    private void closeDialog() {
       setVisible(false);
-      // Both caches are static — nothing to clear on close.
-      // The cust watcher will mark custCacheStale if files change while closed.
    }
 
-   // ── Cache management ───────────────────────────────────────────────────
-   /**
-    * Instance-level entry point called when the dialog opens.
-    * Shows whatever is already cached immediately, then triggers background
-    * builds for anything not yet ready.
-    */
-   private void ensureCache() {
-      boolean coreReady = coreCache != null;
-      boolean custReady = custCache != null && !custCacheStale;
-
-      // Show whatever we have immediately — never block the UI
-      if (custCache != null || coreCache != null) {
+   /** Delegates to the static refresh so logic lives in one place. */
+   private void refreshAllCaches() {
+      statusLabel.setText("Refreshing\u2026");
+      resultModel.clear();
+      refreshAllCachesStatic(() -> {
+         statusLabel.setText("Refresh complete \u2014 " + mergedCache.size() + " files indexed");
          onQueryChanged();
-      }
+      });
+   }
 
-      if (custReady && coreReady) {
-         return;
-      }
+   /** Shows whatever is already cached immediately, then triggers builds for anything not ready. */
+   private void ensureCacheForDialog() {
+      onQueryChanged();
+
+      boolean custReady  = custCache  != null && !custCacheStale;
+      boolean buildReady = buildCache != null;
+      boolean coreReady  = coreCache  != null;
+
+      if (custReady && buildReady && coreReady) return;
+
+      Runnable refresh = this::onQueryChanged;
 
       if (!custReady && !custCacheBuilding) {
-         buildCustCacheAsync();
+         statusLabel.setText("Scanning workspace\u2026");
+         buildCustCacheAsync(refresh);
+      }
+      if (!buildReady && !buildCacheBuilding) {
+         buildBuildCacheAsync(refresh);
       }
       if (!coreReady && !coreCacheBuilding) {
-         buildCoreCacheAsync();
+         if (statusLabel.getText().equals(" ")) {
+            statusLabel.setText("Scanning core files (one-time)\u2026");
+         }
+         buildCoreCacheAsync(refresh);
       }
    }
 
-   // ── Project cache — instance version (updates statusLabel) ────────────
-   private void buildCustCacheAsync() {
-      custCacheBuilding = true;
-      custCacheStale = false;
-      if (custCache == null) {
-         statusLabel.setText("Scanning project files\u2026");
-      }
-      new Thread(() -> {
-         ProgressHandle ph = ProgressHandle.createHandle(
-                 "Open Files: Indexing workspace\u2026");
-         ph.start();
-         try {
-            List<String> roots = collectCustRootsStatic();
-            List<FileEntry> entries = buildCustFilesStatic();
-            SwingUtilities.invokeLater(() -> {
-               custCache = entries;
-               custCacheBuilding = false;
-               registerCustWatcherStatic(roots);
-               onQueryChanged();
-            });
-         } catch (Exception ex) {
-            SwingUtilities.invokeLater(() -> {
-               custCacheBuilding = false;
-               custCacheStale = true;
-               statusLabel.setText("Project scan failed: " + ex.getMessage());
-            });
-         } finally {
-            ph.finish();
-         }
-      }, "QuickFileSearch-CustIndexer").start();
-   }
+   // =========================================================================
+   // Query / filter
+   // =========================================================================
 
-   // ── Project cache — static version (called from ensureIndexed) ────────
-   private static void buildCustCacheAsyncStatic() {
-      custCacheBuilding = true;
-      custCacheStale = false;
-      new Thread(() -> {
-         ProgressHandle ph = ProgressHandle.createHandle(
-                 "Open Files: Indexing workspace\u2026");
-         ph.start();
-         try {
-            List<String> roots = collectCustRootsStatic();
-            List<FileEntry> entries = buildCustFilesStatic();
-            SwingUtilities.invokeLater(() -> {
-               custCache = entries;
-               custCacheBuilding = false;
-               registerCustWatcherStatic(roots);
-            });
-         } catch (Exception ex) {
-            SwingUtilities.invokeLater(() -> {
-               custCacheBuilding = false;
-               custCacheStale = true;
-               System.err.println("[QuickFileSearch] Background cust scan failed: " + ex);
-            });
-         } finally {
-            ph.finish();
-         }
-      }, "QuickFileSearch-CustIndexer").start();
-   }
-
-   // ── Core cache — instance version (updates statusLabel) ───────────────
-   private void buildCoreCacheAsync() {
-      coreCacheBuilding = true;
-      statusLabel.setText("Scanning core files (one-time)\u2026");
-      new Thread(() -> {
-         ProgressHandle ph = ProgressHandle.createHandle(
-                 "Open Files: Indexing core files (one-time)\u2026");
-         ph.start();
-         try {
-            List<String[]> roots = findCoreRootsStatic();
-            if (roots.isEmpty()) {
-               SwingUtilities.invokeLater(() -> {
-                  if (coreCache == null) {
-                     coreCache = new ArrayList<>();
-                  }
-                  coreCacheBuilding = false;
-                  onQueryChanged();
-               });
-               return;
-            }
-            ph.switchToDeterminate(roots.size());
-            List<FileEntry> entries = new ArrayList<>();
-            int i = 0;
-            for (String[] root : roots) {
-               walkDirectory(new File(root[0]), root[0].replace('\\', '/'),
-                       entries, Source.CORE);
-               ph.progress(++i);
-            }
-            System.err.println("[QuickFileSearch] Core cache built: "
-                    + entries.size() + " files");
-            final List<FileEntry> finalEntries = entries;
-            SwingUtilities.invokeLater(() -> {
-               if (coreCache == null) {
-                  coreCache = new ArrayList<>();
-               }
-               coreCache.addAll(finalEntries); // append — don't replace
-               coreCacheBuilding = false;
-               onQueryChanged();
-            });
-         } catch (Exception ex) {
-            SwingUtilities.invokeLater(() -> {
-               if (coreCache == null) {
-                  coreCache = new ArrayList<>();
-               }
-               coreCacheBuilding = false;
-               statusLabel.setText("Core scan failed: " + ex.getMessage());
-            });
-         } finally {
-            ph.finish();
-         }
-      }, "QuickFileSearch-CoreIndexer").start();
-   }
-
-   // ── Core cache — static version (called from ensureIndexed) ──────────
-   private static void buildCoreCacheAsyncStatic() {
-      coreCacheBuilding = true;
-      new Thread(() -> {
-         ProgressHandle ph = ProgressHandle.createHandle(
-                 "Open Files: Indexing core files (one-time)\u2026");
-         ph.start();
-         try {
-            List<String[]> roots = findCoreRootsStatic();
-            if (!roots.isEmpty()) {
-               ph.switchToDeterminate(roots.size());
-               List<FileEntry> entries = new ArrayList<>();
-               int i = 0;
-               for (String[] root : roots) {
-                  walkDirectory(new File(root[0]), root[0].replace('\\', '/'),
-                          entries, Source.CORE);
-                  ph.progress(++i);
-               }
-               System.err.println("[QuickFileSearch] Core cache built (background): "
-                       + entries.size() + " files");
-               final List<FileEntry> finalEntries = entries;
-               SwingUtilities.invokeLater(() -> {
-                  if (coreCache == null) {
-                     coreCache = new ArrayList<>();
-                  }
-                  coreCache.addAll(finalEntries);
-                  coreCacheBuilding = false;
-               });
-            } else {
-               SwingUtilities.invokeLater(() -> {
-                  if (coreCache == null) {
-                     coreCache = new ArrayList<>();
-                  }
-                  coreCacheBuilding = false;
-               });
-            }
-         } catch (Exception ex) {
-            SwingUtilities.invokeLater(() -> {
-               if (coreCache == null) {
-                  coreCache = new ArrayList<>();
-               }
-               coreCacheBuilding = false;
-               System.err.println("[QuickFileSearch] Background core scan failed: " + ex);
-            });
-         } finally {
-            ph.finish();
-         }
-      }, "QuickFileSearch-CoreIndexer").start();
-   }
-
-   // ── Project scanning helpers ───────────────────────────────────────────
-   /**
-    * Returns the workspace root paths of all open projects.
-    * Fast — no file walking, just project root resolution.
-    */
-   private static List<String> collectCustRootsStatic() {
-      List<String> roots = new ArrayList<>();
-      try {
-         org.netbeans.api.project.Project[] projects
-                 = org.netbeans.api.project.ui.OpenProjects
-                         .getDefault().getOpenProjects();
-         for (org.netbeans.api.project.Project project : projects) {
-            FileObject projectDir = project.getProjectDirectory();
-            if (projectDir == null) {
-               continue;
-            }
-            File root = FileUtil.toFile(projectDir);
-            if (root != null && root.isDirectory()) {
-               roots.add(root.getAbsolutePath());
-            }
-         }
-      } catch (Exception ex) {
-         System.err.println("[QuickFileSearch] collectCustRoots: " + ex);
-      }
-      return roots;
-   }
-
-   /**
-    * Walks all open project directories and collects IFS source files.
-    * Duplicate roots are skipped via a local seen set.
-    */
-   private static List<FileEntry> buildCustFilesStatic() {
-      long start = System.currentTimeMillis();
-      System.err.println("[QuickFileSearch] Project scan started");
-      List<FileEntry> result = new ArrayList<>();
-      Set<String> scannedRoots = new HashSet<>();
-
-      org.netbeans.api.project.Project[] projects
-              = org.netbeans.api.project.ui.OpenProjects
-                      .getDefault().getOpenProjects();
-
-      for (org.netbeans.api.project.Project project : projects) {
-         FileObject projectDir = project.getProjectDirectory();
-         if (projectDir == null) {
-            continue;
-         }
-         File root = FileUtil.toFile(projectDir);
-         if (root == null || !root.isDirectory()) {
-            continue;
-         }
-
-         String rootPath = root.getAbsolutePath().replace('\\', '/');
-         if (scannedRoots.add(rootPath)) {
-            walkDirectory(root, rootPath, result, Source.PROJECT);
-         }
-      }
-      System.err.println("[QuickFileSearch] Project scan done: "
-              + result.size() + " files in "
-              + (System.currentTimeMillis() - start) + "ms");
-      return result;
-   }
-
-   /**
-    * Returns a list of [absolutePath, absolutePath] pairs for all unique
-    * Core Files roots found across open projects.
-    *
-    * <p>
-    * Uses the static {@link #coreScannedRoots} set to ensure that if
-    * multiple projects point to the same core checkout, it is returned
-    * (and therefore walked) exactly once per IDE session — even across
-    * multiple calls to this method.
-    */
-   private static List<String[]> findCoreRootsStatic() {
-      List<String[]> roots = new ArrayList<>();
-
-      org.netbeans.api.project.Project[] projects
-              = org.netbeans.api.project.ui.OpenProjects
-                      .getDefault().getOpenProjects();
-
-      for (org.netbeans.api.project.Project project : projects) {
-         FileObject projectDir = project.getProjectDirectory();
-         if (projectDir == null) {
-            continue;
-         }
-         File projRoot = FileUtil.toFile(projectDir);
-         if (projRoot == null) {
-            continue;
-         }
-
-         File coreRoot = readCoreFilesRoot(projRoot);
-         if (coreRoot != null && coreRoot.isDirectory()) {
-            String path = coreRoot.getAbsolutePath();
-            if (coreScannedRoots.add(path)) {
-               roots.add(new String[]{path, path});
-            } else {
-               System.err.println("[QuickFileSearch] Core root already indexed, skipping: "
-                       + path);
-            }
-         }
-      }
-      return roots;
-   }
-
-   /**
-    * Registers a {@code FileChangeListener} on each project root.
-    * When any file is created or deleted, marks the project cache as stale.
-    * The next Ctrl+P (or {@code ensureIndexed()} call) triggers a rebuild.
-    */
-   private static void registerCustWatcherStatic(List<String> roots) {
-      // Unregister previous watcher
-      if (custWatcher != null && custWatchedRoot != null) {
-         try {
-            FileObject fo = FileUtil.toFileObject(
-                    FileUtil.normalizeFile(new File(custWatchedRoot)));
-            if (fo != null) {
-               fo.removeRecursiveListener(custWatcher);
-            }
-         } catch (Exception ex) {
-            System.err.println("[QuickFileSearch] watcher unregister: " + ex);
-         }
-      }
-
-      if (roots.isEmpty()) {
-         return;
-      }
-
-      custWatcher = new org.openide.filesystems.FileChangeAdapter() {
-         @Override
-         public void fileDataCreated(org.openide.filesystems.FileEvent fe) {
-            custCacheStale = true;
-         }
-
-         @Override
-         public void fileFolderCreated(org.openide.filesystems.FileEvent fe) {
-            custCacheStale = true;
-         }
-
-         @Override
-         public void fileDeleted(org.openide.filesystems.FileEvent fe) {
-            custCacheStale = true;
-         }
-      };
-
-      for (String rootPath : roots) {
-         try {
-            FileObject fo = FileUtil.toFileObject(
-                    FileUtil.normalizeFile(new File(rootPath)));
-            if (fo != null) {
-               fo.addRecursiveListener(custWatcher);
-               custWatchedRoot = rootPath;
-               System.err.println("[QuickFileSearch] Watching: " + rootPath);
-            }
-         } catch (Exception ex) {
-            System.err.println("[QuickFileSearch] watcher register: " + ex);
-         }
-      }
-   }
-
-   /**
-    * Reads the IFS Core Files root directory from the project's
-    * {@code nbproject/project.properties} file using the single confirmed
-    * key {@value #CORE_FILES_PROP}.
-    *
-    * <p>
-    * Returns {@code null} — without showing any dialog — when:
-    * <ul>
-    * <li>The property is not set (project has no core files — valid config).</li>
-    * <li>The property value points to a path that does not exist or is not
-    * a directory.</li>
-    * </ul>
-    * Both cases are logged once to {@code messages.log} via {@code System.err}.
-    */
-   private static File readCoreFilesRoot(File projectDir) {
-      File[] candidates = {
-         new File(projectDir, "nbproject/project.properties"),
-         new File(projectDir, "project.properties")
-      };
-
-      for (File propsFile : candidates) {
-         if (!propsFile.exists()) {
-            continue;
-         }
-
-         java.util.Properties props = new java.util.Properties();
-         try (java.io.FileInputStream fis = new java.io.FileInputStream(propsFile)) {
-            props.load(fis);
-         } catch (Exception ex) {
-            System.err.println("[QuickFileSearch] Could not read " + propsFile + ": " + ex);
-            continue;
-         }
-
-         String val = props.getProperty(CORE_FILES_PROP);
-
-         if (val == null || val.trim().isEmpty()) {
-            System.err.println("[QuickFileSearch] " + CORE_FILES_PROP
-                    + " not set in " + propsFile
-                    + " — core file search disabled for this project.");
-            return null;
-         }
-
-         File f = new File(val.trim());
-         if (!f.isAbsolute()) {
-            f = new File(projectDir, val.trim());
-         }
-         f = FileUtil.normalizeFile(f);
-
-         if (!f.exists()) {
-            System.err.println("[QuickFileSearch] Core files path does not exist: "
-                    + f.getAbsolutePath() + " (from " + CORE_FILES_PROP + ")");
-            return null;
-         }
-         if (!f.isDirectory()) {
-            System.err.println("[QuickFileSearch] Core files path is not a directory: "
-                    + f.getAbsolutePath());
-            return null;
-         }
-
-         System.err.println("[QuickFileSearch] Core files root: " + f.getAbsolutePath());
-         return f;
-      }
-      return null;
-   }
-
-   // ── Directory walker ───────────────────────────────────────────────────
-   private static void walkDirectory(File dir, String rootPath,
-           List<FileEntry> result, Source source) {
-      File[] children = dir.listFiles();
-      if (children == null) {
-         return;
-      }
-
-      for (File f : children) {
-         if (f.isHidden()) {
-            continue;
-         }
-         String name = f.getName();
-
-         if (f.isDirectory()) {
-            // Skip obvious noise directories
-            if (name.equals(".git") || name.equals(".svn")
-                    || name.equals("node_modules") || name.equals("target")
-                    || name.equals(".idea") || name.equals("nbproject")) {
-               continue;
-            }
-            // Skip <module>/server directories in both project and core layouts:
-            //   workspace/<module>/server  (project layer)
-            //   checkout/<module>/server   (core files)
-            // These are compiled Java server output — not IFS source files.
-            if (name.equals("server") && isModuleChild(f)) {
-               continue;
-            }
-            // Files inside a /build/ directory are generated artifacts
-            Source childSource = source;
-            if (source == Source.PROJECT && name.equals("build")) {
-               childSource = Source.GENERATED;
-            }
-            walkDirectory(f, rootPath, result, childSource);
-         } else {
-            int dot = name.lastIndexOf('.');
-            if (dot < 0) {
-               continue;
-            }
-            String ext = name.substring(dot + 1).toLowerCase(Locale.ROOT);
-            if (!PluginPrefs.getIndexExtensionSet().contains(ext)) {
-               continue;
-            }
-
-            String absPath = f.getAbsolutePath().replace('\\', '/');
-            String relPath = absPath.startsWith(rootPath)
-                    ? absPath.substring(rootPath.length() + 1)
-                    : absPath;
-            result.add(new FileEntry(name, relPath, absPath, source));
-         }
-      }
-   }
-
-   /**
-    * Returns true when {@code dir} is a direct child of a module directory
-    * that itself sits under a known IFS root folder ("workspace" or "checkout").
-    *
-    * <p>
-    * Matches:
-    * <pre>
-    *   …/workspace/shpmnt/server   (project layer)
-    *   …/checkout/crm/server       (core files)
-    * </pre>
-    * Does NOT match deeper paths like {@code …/workspace/shpmnt/source/x/server}.
-    */
-   private static boolean isModuleChild(File dir) {
-      File module = dir.getParentFile();
-      if (module == null) {
-         return false;
-      }
-      File ifsRoot = module.getParentFile();
-      if (ifsRoot == null) {
-         return false;
-      }
-      String rootName = ifsRoot.getName().toLowerCase(Locale.ROOT);
-      return rootName.equals("workspace") || rootName.equals("checkout");
-   }
-
-   private static String getBaseName(String fileName) {
-      // Strip extension
-      String base = fileName.contains(".")
-              ? fileName.substring(0, fileName.lastIndexOf('.'))
-              : fileName;
-      // Strip -Cust / -Base suffix (case-insensitive)
-      String lower = base.toLowerCase(Locale.ROOT);
-      if (lower.endsWith("-cust") || lower.endsWith("-base")) {
-         base = base.substring(0, base.length() - 5);
-      }
-      return base;
-   }
-
-   // ── Filtering ──────────────────────────────────────────────────────────
    private void onQueryChanged() {
-      // Merge both caches — whichever are available right now
-      List<FileEntry> allFiles = new ArrayList<>();
-      if (custCache != null) {
-         allFiles.addAll(custCache);
-      }
-      if (coreCache != null) {
-         allFiles.addAll(coreCache);
-      }
+      List<FileEntry> allFiles = mergedCache; // single reference — no copy
 
-      if (allFiles.isEmpty() && (custCacheBuilding || coreCacheBuilding)) {
+      if (allFiles.isEmpty() && (custCacheBuilding || coreCacheBuilding || buildCacheBuilding)) {
          resultModel.clear();
          statusLabel.setText("Scanning files\u2026");
          return;
       }
 
-      String query = searchField.getText().trim().toLowerCase(Locale.ROOT);
+      String          query   = searchField.getText().trim().toLowerCase(Locale.ROOT);
       List<FileEntry> matched = new ArrayList<>();
 
       if (query.isEmpty()) {
@@ -859,140 +999,79 @@ public final class QuickFileSearchDialog extends JDialog {
       } else {
          for (FileEntry entry : allFiles) {
             String lowerName = entry.name.toLowerCase(Locale.ROOT);
-            // Strip extension for matching
             String lowerBase = lowerName.contains(".")
-                    ? lowerName.substring(0, lowerName.lastIndexOf('.'))
-                    : lowerName;
+                    ? lowerName.substring(0, lowerName.lastIndexOf('.')) : lowerName;
 
-            // Detect IFS naming convention suffixes
-            boolean isCust = lowerBase.endsWith("-cust");
-            boolean isBase = lowerBase.endsWith("-base");
-            // Strip suffix so "customerorder" matches "CustomerOrder-Cust.entity"
-            String matchBase = (isCust || isBase)
-                    ? lowerBase.substring(0, lowerBase.length() - 5)
-                    : lowerBase;
+            boolean isCust    = lowerBase.endsWith("-cust");
+            boolean isBase    = lowerBase.endsWith("-base");
+            String  matchBase = (isCust || isBase)
+                    ? lowerBase.substring(0, lowerBase.length() - 5) : lowerBase;
 
-            // Tier scoring:
-            //   -Cust (project layer)  ← highest
-            //   plain (core, no suffix)
-            //   -Base
-            //   GEN (build output)     ← lowest
             int tierScore;
-            if (entry.source == Source.GENERATED) {
-               tierScore = 1;
-            } else if (isCust) {
-               tierScore = 1000;
-            } else if (!isBase) {
-               tierScore = 500;
-            } else {
-               tierScore = 10;
-            }
+            if      (entry.source == Source.GENERATED) tierScore = 1;
+            else if (isCust)                           tierScore = 1000;
+            else if (!isBase)                          tierScore = 500;
+            else                                       tierScore = 10;
 
-            String lowerFull = lowerName; // full name with extension, lowercased
-
-            if (matchBase.startsWith(query)) {
-               entry.score = tierScore + 10;
-               matched.add(entry);
-            } else if (matchBase.contains(query)) {
-               entry.score = tierScore;
-               matched.add(entry);
-            } else if (lowerBase.startsWith(query)) {    // <-- ADD: matches "customerorder-cust"
-               entry.score = tierScore + 10;
-               matched.add(entry);
-            } else if (lowerBase.contains(query)) {          // <-- ADD: contains "customerorder-cust"
-               entry.score = tierScore;
-               matched.add(entry);
-            } else if (lowerFull.startsWith(query)) {    // <-- ADD: matches "customerorder-cust.plsql"
-               entry.score = tierScore + 10;
-               matched.add(entry);
-            } else if (lowerFull.contains(query)) {          // <-- ADD: contains "customerorder-cust.plsql"
-               entry.score = tierScore;
-               matched.add(entry);
-            }
+            if      (matchBase.startsWith(query)) { entry.score = tierScore + 10; matched.add(entry); }
+            else if (matchBase.contains(query))   { entry.score = tierScore;      matched.add(entry); }
+            else if (lowerBase.startsWith(query)) { entry.score = tierScore + 10; matched.add(entry); }
+            else if (lowerBase.contains(query))   { entry.score = tierScore;      matched.add(entry); }
+            else if (lowerName.startsWith(query)) { entry.score = tierScore + 10; matched.add(entry); }
+            else if (lowerName.contains(query))   { entry.score = tierScore;      matched.add(entry); }
          }
+
          matched.sort((a, b) -> {
-            String baseA = getBaseName(a.name);
-            String baseB = getBaseName(b.name);
-            String lowerBaseA = baseA.toLowerCase(Locale.ROOT);
-            String lowerBaseB = baseB.toLowerCase(Locale.ROOT);
-            String lowerFullA = a.name.toLowerCase(Locale.ROOT);
-            String lowerFullB = b.name.toLowerCase(Locale.ROOT);
+            String baseA   = getBaseName(a.name);
+            String baseB   = getBaseName(b.name);
+            String lowerA  = a.name.toLowerCase(Locale.ROOT);
+            String lowerB  = b.name.toLowerCase(Locale.ROOT);
+            String lowerBa = baseA.toLowerCase(Locale.ROOT);
+            String lowerBb = baseB.toLowerCase(Locale.ROOT);
 
-            // Primary: exact filename match floats to top
-            boolean aExact = lowerFullA.equals(query);
-            boolean bExact = lowerFullB.equals(query);
-            if (aExact && !bExact) {
-               return -1;
-            }
-            if (!aExact && bExact) {
-               return 1;
-            }
+            boolean aExact = lowerA.equals(query),        bExact = lowerB.equals(query);
+            if (aExact != bExact) return aExact ? -1 : 1;
 
-            // Secondary: prefix match on full filename
-            boolean aFullPrefix = lowerFullA.startsWith(query);
-            boolean bFullPrefix = lowerFullB.startsWith(query);
-            if (aFullPrefix && !bFullPrefix) {
-               return -1;
-            }
-            if (!aFullPrefix && bFullPrefix) {
-               return 1;
-            }
+            boolean aFP = lowerA.startsWith(query),       bFP = lowerB.startsWith(query);
+            if (aFP != bFP) return aFP ? -1 : 1;
 
-            // Tertiary: prefix match on base name
-            boolean aPrefixMatch = lowerBaseA.startsWith(query);
-            boolean bPrefixMatch = lowerBaseB.startsWith(query);
-            if (aPrefixMatch && !bPrefixMatch) {
-               return -1;
-            }
-            if (!aPrefixMatch && bPrefixMatch) {
-               return 1;
-            }
+            boolean aBP = lowerBa.startsWith(query),      bBP = lowerBb.startsWith(query);
+            if (aBP != bBP) return aBP ? -1 : 1;
 
-            // Quaternary: group by base name alphabetically
-            int nameCmp = baseA.compareToIgnoreCase(baseB);
-            if (nameCmp != 0) {
-               return nameCmp;
-            }
+            int nc = baseA.compareToIgnoreCase(baseB);
+            if (nc != 0) return nc;
 
-            // Quinary: within same base name, sort by tier (highest score first)
-            int cmp = Integer.compare(b.score, a.score);
-            if (cmp != 0) {
-               return cmp;
-            }
+            int tc = Integer.compare(b.score, a.score);
+            if (tc != 0) return tc;
 
-            // Senary: alphabetical by full filename
             return a.name.compareToIgnoreCase(b.name);
          });
       }
 
       int displayCount = Math.min(matched.size(), 100);
       resultModel.clear();
-      for (int i = 0; i < displayCount; i++) {
-         resultModel.addElement(matched.get(i));
-      }
-      if (!resultModel.isEmpty()) {
-         resultList.setSelectedIndex(0);
-      }
+      for (int i = 0; i < displayCount; i++) resultModel.addElement(matched.get(i));
+      if (!resultModel.isEmpty()) resultList.setSelectedIndex(0);
 
       // Status bar
-      int custCount = custCache != null ? custCache.size() : 0;
-      int coreCount = coreCache != null ? coreCache.size() : 0;
-      int total = custCount + coreCount;
-      String building = (custCacheBuilding || coreCacheBuilding) ? " (scanning\u2026)" : "";
-      if (query.isEmpty()) {
-         statusLabel.setText(total + " files indexed" + building);
-      } else {
-         statusLabel.setText(matched.size() + " results  \u00b7  "
-                 + total + " files" + building);
-      }
+      int custCount  = custCache  != null ? custCache.size()  : 0;
+      int buildCount = buildCache != null ? buildCache.size() : 0;
+      int coreCount  = coreCache  != null ? coreCache.size()  : 0;
+      int total      = custCount + buildCount + coreCount;
+      String building = (custCacheBuilding || coreCacheBuilding || buildCacheBuilding)
+              ? " (scanning\u2026)" : "";
+      statusLabel.setText(query.isEmpty()
+              ? total + " files indexed" + building
+              : matched.size() + " results  \u00b7  " + total + " files" + building);
    }
 
-   // ── Open selected ──────────────────────────────────────────────────────
+   // =========================================================================
+   // Open selected file
+   // =========================================================================
+
    private void openSelected() {
       FileEntry entry = resultList.getSelectedValue();
-      if (entry == null) {
-         return;
-      }
+      if (entry == null) return;
       closeDialog();
       openFile(entry.absolutePath, entry.name);
    }
@@ -1003,31 +1082,26 @@ public final class QuickFileSearchDialog extends JDialog {
                  new File(absolutePath.replace('/', File.separatorChar)));
          if (!file.exists()) {
             JOptionPane.showMessageDialog(null,
-                    "File not found:\n" + absolutePath,
-                    "Open Failed", JOptionPane.WARNING_MESSAGE);
+                    "File not found:\n" + absolutePath, "Open Failed", JOptionPane.WARNING_MESSAGE);
             return;
          }
          FileObject parentFo = FileUtil.toFileObject(file.getParentFile());
-         if (parentFo != null) {
-            parentFo.refresh();
-         }
+         if (parentFo != null) parentFo.refresh();
 
          FileObject fo = FileUtil.toFileObject(file);
          if (fo == null) {
             JOptionPane.showMessageDialog(null,
-                    "Could not resolve file:\n" + absolutePath,
-                    "Open Failed", JOptionPane.WARNING_MESSAGE);
+                    "Could not resolve file:\n" + absolutePath, "Open Failed", JOptionPane.WARNING_MESSAGE);
             return;
          }
          DataObject dob = DataObject.find(fo);
-         OpenCookie oc = dob.getLookup().lookup(OpenCookie.class);
+         OpenCookie oc  = dob.getLookup().lookup(OpenCookie.class);
          if (oc != null) {
             oc.open();
          } else {
             javax.swing.Action action = dob.getNodeDelegate().getPreferredAction();
             if (action != null && action.isEnabled()) {
-               action.actionPerformed(
-                       new ActionEvent(this, ActionEvent.ACTION_PERFORMED, ""));
+               action.actionPerformed(new ActionEvent(this, ActionEvent.ACTION_PERFORMED, ""));
             }
          }
       } catch (Exception ex) {
@@ -1038,35 +1112,38 @@ public final class QuickFileSearchDialog extends JDialog {
       }
    }
 
-   // ── Positioning ────────────────────────────────────────────────────────
+   // =========================================================================
+   // Positioning
+   // =========================================================================
+
    private void centerOnOwner(Frame owner) {
-      Rectangle ownerBounds = owner.getBounds();
-      int x = ownerBounds.x + (ownerBounds.width - getWidth()) / 2;
-      int y = ownerBounds.y + (ownerBounds.height - getHeight()) / 3;
-      setLocation(x, y);
+      Rectangle b = owner.getBounds();
+      setLocation(b.x + (b.width  - getWidth())  / 2,
+                  b.y + (b.height - getHeight()) / 3);
    }
 
-   // ── Cell renderer ──────────────────────────────────────────────────────
+   // =========================================================================
+   // Cell renderer
+   // =========================================================================
+
    private static final class FileEntryRenderer extends JPanel
            implements ListCellRenderer<FileEntry> {
 
-      private static final Color BADGE_CORE_BG = new Color(0x6A1B9A); // purple
-      private static final Color BADGE_GENERATED_BG = new Color(0xE65100); // orange
-      private static final Color BADGE_FG = Color.WHITE;
+      private static final Color BADGE_CORE_BG      = new Color(0x6A1B9A);
+      private static final Color BADGE_GENERATED_BG = new Color(0xE65100);
+      private static final Color BADGE_FG           = Color.WHITE;
 
-      private final JLabel nameLabel = new JLabel();
-      private final JLabel pathLabel = new JLabel();
+      private final JLabel nameLabel  = new JLabel();
+      private final JLabel pathLabel  = new JLabel();
       private final JLabel badgeLabel = new JLabel();
 
       FileEntryRenderer() {
          setLayout(new BorderLayout(0, 2));
          setBorder(new EmptyBorder(5, 12, 5, 12));
-
          nameLabel.setFont(nameLabel.getFont().deriveFont(Font.BOLD, 12f));
          pathLabel.setFont(pathLabel.getFont().deriveFont(Font.PLAIN, 10f));
-
-         Color dimColor = UIManager.getColor("Label.disabledForeground");
-         pathLabel.setForeground(dimColor != null ? dimColor : new Color(130, 130, 130));
+         Color dim = UIManager.getColor("Label.disabledForeground");
+         pathLabel.setForeground(dim != null ? dim : new Color(130, 130, 130));
 
          JPanel textPanel = new JPanel(new BorderLayout(0, 1));
          textPanel.setOpaque(false);
@@ -1091,31 +1168,24 @@ public final class QuickFileSearchDialog extends JDialog {
 
          switch (value.source) {
             case CORE:
-               badgeLabel.setText("CORE");
-               badgeLabel.setBackground(BADGE_CORE_BG);
-               break;
+               badgeLabel.setText("CORE"); badgeLabel.setBackground(BADGE_CORE_BG);      break;
             case GENERATED:
-               badgeLabel.setText("GEN");
-               badgeLabel.setBackground(BADGE_GENERATED_BG);
-               break;
+               badgeLabel.setText("GEN");  badgeLabel.setBackground(BADGE_GENERATED_BG); break;
             default:
-               badgeLabel.setText("");
-               badgeLabel.setBackground(null);
-               break;
+               badgeLabel.setText("");     badgeLabel.setBackground(null);
          }
 
          if (isSelected) {
             setBackground(list.getSelectionBackground());
             nameLabel.setForeground(list.getSelectionForeground());
-            Color selFg = list.getSelectionForeground();
-            pathLabel.setForeground(blend(selFg, list.getSelectionBackground(), 0.35f));
+            pathLabel.setForeground(blend(list.getSelectionForeground(),
+                    list.getSelectionBackground(), 0.35f));
          } else {
             setBackground(list.getBackground());
             nameLabel.setForeground(list.getForeground());
             Color dim = UIManager.getColor("Label.disabledForeground");
             pathLabel.setForeground(dim != null ? dim : new Color(130, 130, 130));
          }
-
          setOpaque(true);
          revalidate();
          return this;
@@ -1125,47 +1195,31 @@ public final class QuickFileSearchDialog extends JDialog {
       protected void paintComponent(Graphics g) {
          super.paintComponent(g);
          String text = badgeLabel.getText();
-         if (text == null || text.isEmpty()) {
-            return;
-         }
+         if (text == null || text.isEmpty()) return;
 
          Graphics2D g2 = (Graphics2D) g.create();
-         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
-                 RenderingHints.VALUE_ANTIALIAS_ON);
-         g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING,
-                 RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,      RenderingHints.VALUE_ANTIALIAS_ON);
+         g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
 
-         Font badgeFont = badgeLabel.getFont();
-         g2.setFont(badgeFont);
-         FontMetrics fm = g2.getFontMetrics();
-         int textW = fm.stringWidth(text);
-         int textH = fm.getAscent();
-
-         int padH = 3;
-         int padW = 6;
-         int pillW = textW + padW * 2;
-         int pillH = textH + padH * 2;
-
-         int x = getWidth() - pillW - 12;
-         int y = (getHeight() - pillH) / 2;
+         g2.setFont(badgeLabel.getFont());
+         FontMetrics fm    = g2.getFontMetrics();
+         int textW = fm.stringWidth(text), textH = fm.getAscent();
+         int padH = 3, padW = 6;
+         int pillW = textW + padW * 2, pillH = textH + padH * 2;
+         int x = getWidth() - pillW - 12, y = (getHeight() - pillH) / 2;
 
          g2.setColor(badgeLabel.getBackground());
          g2.fillRoundRect(x, y, pillW, pillH, pillH, pillH);
-
          g2.setColor(BADGE_FG);
          g2.drawString(text, x + padW, y + padH + textH - 1);
-
          g2.dispose();
       }
 
       private static Color blend(Color a, Color b, float t) {
-         int r = Math.round(a.getRed() + t * (b.getRed() - a.getRed()));
-         int g = Math.round(a.getGreen() + t * (b.getGreen() - a.getGreen()));
-         int bl = Math.round(a.getBlue() + t * (b.getBlue() - a.getBlue()));
          return new Color(
-                 Math.max(0, Math.min(255, r)),
-                 Math.max(0, Math.min(255, g)),
-                 Math.max(0, Math.min(255, bl)));
+                 Math.max(0, Math.min(255, Math.round(a.getRed()   + t * (b.getRed()   - a.getRed())))),
+                 Math.max(0, Math.min(255, Math.round(a.getGreen() + t * (b.getGreen() - a.getGreen())))),
+                 Math.max(0, Math.min(255, Math.round(a.getBlue()  + t * (b.getBlue()  - a.getBlue())))));
       }
    }
 }

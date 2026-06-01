@@ -219,6 +219,14 @@ public final class OpenFilesTopComponent extends TopComponent {
       }
    };
 
+   private final java.beans.PropertyChangeListener projectListener = evt -> {
+      if (org.netbeans.api.project.ui.OpenProjects.PROPERTY_OPEN_PROJECTS
+              .equals(evt.getPropertyName())) {
+         // Runs on a project-system thread — dispatch to EDT for safety
+         SwingUtilities.invokeLater(QuickFileSearchDialog::onOpenProjectsChanged);
+      }
+   };
+
    // ── Singleton ─────────────────────────────────────────────────────────
    public static synchronized OpenFilesTopComponent getInstance() {
       if (instance == null) {
@@ -1970,6 +1978,7 @@ public final class OpenFilesTopComponent extends TopComponent {
    private void registerListeners() {
       if (!listenersRegistered) {
          TopComponent.getRegistry().addPropertyChangeListener(windowListener);
+         org.netbeans.api.project.ui.OpenProjects.getDefault().addPropertyChangeListener(projectListener);
          listenersRegistered = true;
       }
    }
@@ -1977,6 +1986,7 @@ public final class OpenFilesTopComponent extends TopComponent {
    private void unregisterListeners() {
       if (listenersRegistered) {
          TopComponent.getRegistry().removePropertyChangeListener(windowListener);
+         org.netbeans.api.project.ui.OpenProjects.getDefault().removePropertyChangeListener(projectListener);
          listenersRegistered = false;
       }
    }
@@ -2923,17 +2933,6 @@ public final class OpenFilesTopComponent extends TopComponent {
    // =========================================================================
    @Override
    public void componentOpened() {
-      org.openide.filesystems.FileObject fo = FileUtil.toFileObject(
-              FileUtil.normalizeFile(new java.io.File("E:\\NetBeansProjects\\Siff_Dev_24_1\\build\\gen\\db\\cmod\\database\\cmod\\CSiffScaleIntLog-Base.storage")));
-      if (fo != null) {
-         System.err.println("MIME: " + fo.getMIMEType());
-      }
-
-      org.openide.filesystems.FileObject fo1 = FileUtil.toFileObject(
-              FileUtil.normalizeFile(new java.io.File("E:\\NetBeansProjects\\Siff_Dev_24_1\\workspace\\cmod\\source\\cmod\\database\\CPulseInterfaceHanding-Cust.plsvc")));
-      if (fo1 != null) {
-         System.err.println("MIME: " + fo1.getMIMEType());
-      }
       SwingUtilities.invokeLater(() -> {
          WindowManager wm = WindowManager.getDefault();
          Mode currentMode = wm.findMode(this);
@@ -2954,6 +2953,9 @@ public final class OpenFilesTopComponent extends TopComponent {
       registerListeners();
       refreshList();
       scheduleDelayedRefresh();
+      // Seed the initial core-roots snapshot so the first ensureIndexed()
+      // knows what it is building and can detect future changes correctly.
+      QuickFileSearchDialog.seedInitialCoreRoots();
       QuickFileSearchDialog.ensureIndexed();
    }
 

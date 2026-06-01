@@ -36,7 +36,6 @@ RMB Options:
 
 ### Stash / Restore
 Press the 🗃 toolbar button to snapshot your current open files, close them all, and restore them later — like `git stash` for your editor tabs.
-
 - **Stash current files** — name the stash (defaults to timestamp), confirm the file list, then all files are closed and saved
 - **Stash selected files** — right-click any selection → *Stash selected files…* to stash only those files
 - **Restore** — reopen all files from a named stash; missing files are silently skipped with a summary
@@ -48,7 +47,8 @@ Press the 🗃 toolbar button to snapshot your current open files, close them al
 Press **Ctrl+P** anywhere in IFS Developer Studio to open a floating search popup.  
 Type any part of a filename — results update on every keystroke.  
 Press **Enter** or click to open the file. **Escape** dismisses.  
-The 🔍 button in the Open Files panel toolbar also opens the dialog.
+The 🔍 button in the Open Files panel toolbar also opens the dialog.  
+The ↻ button inside the dialog manually refreshes all caches.
 
 #### Search behaviour
 - **Strict substring/prefix matching** — no fuzzy noise; only files whose base name starts with or contains your query are shown
@@ -83,11 +83,21 @@ Default set covers all standard IFS source types:
 Add or remove extensions at any time — the project cache rebuilds automatically on the next search.
 
 #### Performance & caching
-Both caches are held in memory for the entire IDE session and survive dialog close/reopen:
+Three independent caches are held in memory for the entire IDE session and survive dialog close/reopen.
+Indexing starts automatically in the background when the panel opens — **Ctrl+P is instant on first press**.
 
-- **Project files** — scanned once at IDE startup (background), then monitored via a `FileChangeListener`. Cache is only invalidated when files are actually created or deleted. The dialog always opens instantly showing the existing cache; any rebuild runs silently in the background with a progress indicator in the IDE status bar.
-- **Core files** — scanned once per session, never rescanned automatically (core files change rarely). Multiple projects pointing to the same core checkout are deduplicated — each unique path is scanned exactly once per session. Progress shown in the IDE status bar during the one-time scan.
-- Excluded from indexing: `server/` directories directly under any `workspace/<module>/` or `checkout/<module>/` path (lobby, configuration and report related .xsd, .rdl ..etc files)
+| Cache | Source | Invalidation |
+|-------|--------|-------------|
+| **Project** | `workspace/` files | Incremental: single entry added/removed on file create/delete. No full rebuild unless project changes. |
+| **Build** | `build/` generated files | Debounced: one rebuild fires 3 seconds after IFS code-gen bursts finish, not once per generated file. |
+| **Core** | `checkout/` core files | Rebuilt only when the set of open project core roots changes (project open/close). Switching from one IFS version to another correctly triggers a full core rescan. |
+
+Additional details:
+- Directory walk runs in parallel using a shared `ForkJoinPool` (up to 4 threads)
+- File-system watchers are scoped to `workspace/` and `build/` only — never the full project root, avoiding expensive OS-level watch setup on thousands of directories
+- Any open NetBeans project without a `workspace/` subdirectory (plain Java projects, plugin projects, etc.) is excluded from indexing and watching entirely
+- Multiple projects pointing to the same core checkout are deduplicated — each unique path is walked exactly once
+- Excluded from indexing: `server/` directories directly under any `workspace/<module>/` or `checkout/<module>/` path (lobby, configuration and report related `.xsd`, `.rdl` etc.)
 
 #### Find File from editor (RMB)
 Right-click selected text in any PL/SQL or PLSVC file to access two actions:
