@@ -66,6 +66,8 @@ public final class FindApiFileAction implements ActionListener {
             stripped = stripped.substring(0, stripped.length() - 4);
         } else if (stripped.toUpperCase(Locale.ROOT).endsWith("_SYS")) {
             stripped = stripped.substring(0, stripped.length() - 4);
+        } else if (stripped.toUpperCase(Locale.ROOT).endsWith("_SVC")) {
+            stripped = stripped.substring(0, stripped.length() - 4);
         }
         String[] parts = stripped.split("_", -1);
         StringBuilder sb = new StringBuilder();
@@ -74,43 +76,6 @@ public final class FindApiFileAction implements ActionListener {
             sb.append(Character.toUpperCase(part.charAt(0)));
             sb.append(part.substring(1).toLowerCase(Locale.ROOT));
         }
-        return sb.toString();
-    }
-
-    /**
-     * Converts snake_case API/SYS names to a formatted display string,
-     * preserving underscores, capitalising each word, uppercasing the suffix.
-     *
-     * Examples:
-     *   customer_order_api  →  Customer_Order_API
-     *   client_sys          →  Client_SYS
-     *   shipment_line_api   →  Shipment_Line_API
-     */
-    static String convertApiNameFormatted(String raw) {
-        if (raw == null || raw.isEmpty()) return raw;
-
-        String upper = raw.toUpperCase(Locale.ROOT);
-        String suffix = "";
-        String body = raw;
-
-        if (upper.endsWith("_API")) {
-            suffix = "_API";
-            body = raw.substring(0, raw.length() - 4);
-        } else if (upper.endsWith("_SYS")) {
-            suffix = "_SYS";
-            body = raw.substring(0, raw.length() - 4);
-        }
-
-        String[] parts = body.split("_", -1);
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < parts.length; i++) {
-            String part = parts[i];
-            if (part.isEmpty()) continue;
-            if (i > 0) sb.append("_");
-            sb.append(Character.toUpperCase(part.charAt(0)));
-            sb.append(part.substring(1).toLowerCase(Locale.ROOT));
-        }
-        sb.append(suffix); // _API or _SYS already uppercased
         return sb.toString();
     }
 }

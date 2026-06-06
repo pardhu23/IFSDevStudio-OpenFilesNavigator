@@ -47,9 +47,46 @@ public final class FormatApiNameAction implements ActionListener {
         // Only act on _API or _SYS selections — silently ignore anything else
         if (!upper.endsWith("_API") && !upper.endsWith("_SYS")) return;
 
-        String formatted = FindApiFileAction.convertApiNameFormatted(raw);
+        String formatted = convertApiNameFormatted(raw);
 
         // Replace the selected text in the editor with the formatted name
         editor.replaceSelection(formatted);
+    }
+    
+    /**
+     * Converts snake_case API/SYS names to a formatted display string,
+     * preserving underscores, capitalising each word, uppercasing the suffix.
+     *
+     * Examples:
+     *   customer_order_api  →  Customer_Order_API
+     *   client_sys          →  Client_SYS
+     *   shipment_line_api   →  Shipment_Line_API
+     */
+    static String convertApiNameFormatted(String raw) {
+        if (raw == null || raw.isEmpty()) return raw;
+
+        String upper = raw.toUpperCase(Locale.ROOT);
+        String suffix = "";
+        String body = raw;
+
+        if (upper.endsWith("_API")) {
+            suffix = "_API";
+            body = raw.substring(0, raw.length() - 4);
+        } else if (upper.endsWith("_SYS")) {
+            suffix = "_SYS";
+            body = raw.substring(0, raw.length() - 4);
+        }
+
+        String[] parts = body.split("_", -1);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < parts.length; i++) {
+            String part = parts[i];
+            if (part.isEmpty()) continue;
+            if (i > 0) sb.append("_");
+            sb.append(Character.toUpperCase(part.charAt(0)));
+            sb.append(part.substring(1).toLowerCase(Locale.ROOT));
+        }
+        sb.append(suffix); // _API or _SYS already uppercased
+        return sb.toString();
     }
 }
