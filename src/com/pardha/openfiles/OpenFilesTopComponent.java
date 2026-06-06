@@ -232,7 +232,11 @@ public final class OpenFilesTopComponent extends TopComponent {
         quickSearchBtn.setFont(quickSearchBtn.getFont().deriveFont(12f));
         quickSearchBtn.setToolTipText("Quick File Search (Ctrl+P)");
         quickSearchBtn.addActionListener(e -> QuickFileSearchDialog.showDialog());
-
+        
+        JButton depTreeBtn = new JButton("Module Links");
+        depTreeBtn.setToolTipText("Show IFS Module Dependencies (based on MODULE_DEPENDENCY_TAB)");
+        depTreeBtn.addActionListener(e -> ModuleDependencyTreePanel.openWindow());
+        
         JPanel btnPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
         btnPanel.setOpaque(false);
         btnPanel.add(listBtn);
@@ -241,6 +245,7 @@ public final class OpenFilesTopComponent extends TopComponent {
         btnPanel.add(quickSearchBtn);
         btnPanel.add(stashBtn);
         btnPanel.add(settingsBtn);
+        btnPanel.add(depTreeBtn);
         titleRow.add(btnPanel, BorderLayout.EAST);
         northPanel.add(titleRow, BorderLayout.NORTH);
 
