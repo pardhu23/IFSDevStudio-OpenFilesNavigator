@@ -1,20 +1,26 @@
-# IFSDevStudio-OpenFilesNavigator
+# OpenFilesNavigator
 A dockable **Open Files Navigator** panel for **IFS Developer Studio 18** (NetBeans 18).  
 Replaces the built-in tab strip with a resizable, searchable, collapsible panel with
 pinning, grouping, color tags, stash/restore, recently-closed history, and IFS-aware actions.
 
 ---
+
+<img width="952" height="102" alt="image" src="https://github.com/user-attachments/assets/d4443ef2-11f3-4121-91c8-a12158adb4d4" />
+
+
 List View:
 
-<img width="437" height="567" alt="image" src="https://github.com/user-attachments/assets/11c24440-a7c4-4d4f-be21-2c2cf5c6d39a" />
+<img width="530" height="497" alt="image" src="https://github.com/user-attachments/assets/f8e03e55-06a5-487a-8a65-5ecdf35ad23a" />
 
 Tree View:
 
-<img width="442" height="572" alt="image" src="https://github.com/user-attachments/assets/98553e36-b5b0-4ea1-9176-97187356b926" />
+<img width="527" height="513" alt="image" src="https://github.com/user-attachments/assets/db6b6df8-11d5-4ef1-b627-26e2afe1a19d" />
+
 
 RMB Options:
 
-<img width="637" height="465" alt="image" src="https://github.com/user-attachments/assets/3c144f0f-4263-48ce-aff5-baecf0f2a106" />
+<img width="535" height="745" alt="image" src="https://github.com/user-attachments/assets/995e1804-eedb-44ed-8332-fb69c31a65c4" />
+
 
 ---
 
@@ -33,15 +39,6 @@ RMB Options:
 - **Customize This** — right-click a core file to create a `-Cust` customisation layer directly from the panel
 - **Build file detection** — generated files (paths containing `/build/`) shown italic in slate-blue; optionally grouped under a separate "Generated" section
 - **Close button** — × button on every file row in both list and tree views
-
-### Stash / Restore
-Press the 🗃 toolbar button to snapshot your current open files, close them all, and restore them later — like `git stash` for your editor tabs.
-- **Stash current files** — name the stash (defaults to timestamp), confirm the file list, then all files are closed and saved
-- **Stash selected files** — right-click any selection → *Stash selected files…* to stash only those files
-- **Restore** — reopen all files from a named stash; missing files are silently skipped with a summary
-- **Peek** — inspect the file list inside a stash before committing to restore
-- **Delete** — remove a stash when no longer needed
-- Multiple named stashes persist across IDE restarts
 
 ### Quick File Search (`Ctrl+P`)
 Press **Ctrl+P** anywhere in IFS Developer Studio to open a floating search popup.  
@@ -98,6 +95,53 @@ Additional details:
 - Any open NetBeans project without a `workspace/` subdirectory (plain Java projects, plugin projects, etc.) is excluded from indexing and watching entirely
 - Multiple projects pointing to the same core checkout are deduplicated — each unique path is walked exactly once
 - Excluded from indexing: `server/` directories directly under any `workspace/<module>/` or `checkout/<module>/` path (lobby, configuration and report related `.xsd`, `.rdl` etc.)
+
+### Stash / Restore
+Press the 🗃 toolbar button to snapshot your current open files, close them all, and restore them later — like `git stash` for your editor tabs.
+- **Stash current files** — name the stash (defaults to timestamp), confirm the file list, then all files are closed and saved
+- **Stash selected files** — right-click any selection → *Stash selected files…* to stash only those files
+- **Restore** — reopen all files from a named stash; missing files are silently skipped with a summary
+- **Peek** — inspect the file list inside a stash before committing to restore
+- **Delete** — remove a stash when no longer needed
+- Multiple named stashes persist across IDE restarts
+
+### Module Dependency Explorer
+
+Open via the **Module Links** button in the Open Files panel toolbar.  
+Displays live module dependency data fetched directly from `MODULE_DEPENDENCY_TAB` in the connected IFS database.
+
+> Requires an active IFS server connection. Data is read from the `DatabaseContentManager` cache — open a project and connect to the database before opening the explorer.
+
+#### Static dependencies tab
+Shows all modules and their static dependencies as a flat expandable tree.  
+Each module node shows the number of direct dependencies in parentheses.  
+Expand a module to see which modules it statically depends on.
+
+#### Dynamic dependencies tab
+Same view as Static, but for dynamic dependencies.
+
+#### Static Path Finder tab
+Find the dependency chain between any two modules.
+
+| Field | Description |
+|-------|-------------|
+| **From** | The starting module (e.g. `REQMGT`) |
+| **To** | The target module (e.g. `WO`) |
+
+- Press **Find Path** or hit **Enter** in either field to search
+- Searches only static dependencies
+- Uses Breadth-First Search (BFS) to find all paths between the two modules (capped at 20)
+- Each path is shown as a single expandable node: `REQMGT → SERCAT → WO`
+- Expanding a path node shows each individual hop: `REQMGT --[STATIC]--> SERCAT`
+- If no path exists, a message is shown
+
+**Example:**
+
+<img width="800" height="397" alt="image" src="https://github.com/user-attachments/assets/7d50a194-230f-4bb9-822e-c9f27c22e2a6" />
+
+- Data is read from `DatabaseContentManager.getStaticDependencies()` and `getDynamicDependecies()` via reflection — no compile-time dependency on IFS internal JARs required
+- The explorer reads from the in-memory cache populated at DB connect time — no additional DB queries are fired when the window opens
+- If the cache is still loading after a fresh connect, close and reopen the explorer after a few seconds
 
 #### Find File from editor (RMB)
 Right-click selected text in any PL/SQL or PLSVC file to access two actions:
