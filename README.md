@@ -40,11 +40,12 @@ RMB Options:
 - **Build file detection** — generated files (paths containing `/build/`) shown italic in slate-blue; optionally grouped under a separate "Generated" section
 - **Close button** — × button on every file row in both list and tree views
 
-### Quick File Search (`Ctrl+P`)
-Press **Ctrl+P** anywhere in IFS Developer Studio to open a floating search popup.  
+### Quick File Search (`Alt+P`)
+Press **Alt+P** anywhere in IFS Developer Studio to open a floating search popup.  
 Type any part of a filename — results update on every keystroke.  
 Press **Enter** or click to open the file. **Escape** dismisses.  
-The 🔍 button in the Open Files panel toolbar also opens the dialog.  
+The 🔍 button in the Open Files panel toolbar also opens the dialog. 
+The ⇄ button converts a pasted `_API` / `_SYS` / `_SVC` package name to PascalCase inline — e.g. type `customer_order_api` and press ⇄ to replace it with `CustomerOrder`. 
 The ↻ button inside the dialog manually refreshes all caches.
 
 #### Search behaviour
@@ -81,7 +82,7 @@ Add or remove extensions at any time — the project cache rebuilds automaticall
 
 #### Performance & caching
 Three independent caches are held in memory for the entire IDE session and survive dialog close/reopen.
-Indexing starts automatically in the background when the panel opens — **Ctrl+P is instant on first press**.
+Indexing starts automatically in the background when the panel opens — **Alt+P is instant on first press**.
 
 | Cache | Source | Invalidation |
 |-------|--------|-------------|
@@ -143,6 +144,15 @@ Find the dependency chain between any two modules.
 - The explorer reads from the in-memory cache populated at DB connect time — no additional DB queries are fired when the window opens
 - If the cache is still loading after a fresh connect, close and reopen the explorer after a few seconds
 
+#### Right-click a module node — Open deploy.ini
+Right-click any module in the Static or Dynamic tab to open its `deploy.ini` directly in the IDE editor.
+
+Resolution order:
+1. `{projectRoot}/workspace/{MODULE}/deploy.ini` — from current workspace path
+2. `{coreFilesRoot}/{MODULE}/deploy.ini` — from IFS core path  (path read from `project.ccs.corefiles`)
+
+If neither file is found, a dialog lists the paths that were checked.
+
 #### Find File from editor (RMB)
 Right-click selected text in any PL/SQL or PLSVC file to access two actions:
 
@@ -165,7 +175,7 @@ Open via the ⚙ button in the Open Files panel toolbar.
 
 | Setting | Options | Description |
 |---------|---------|-------------|
-| **Quick Search extensions** | Comma-separated list (wrapping text area) | File extensions to index for Ctrl+P search |
+| **Quick Search extensions** | Comma-separated list (wrapping text area) | File extensions to index for Alt+P search |
 | **Note display** | Tooltip / Inline `✎` / Subtitle | How file notes appear in the list |
 | **Generated files** | Inline / Grouped | Show build files inline or under a "Generated" section |
 | **Tree grouping** | Folder path / IFS component | How ungrouped files are grouped in tree view |
@@ -181,20 +191,21 @@ Open via the ⚙ button in the Open Files panel toolbar.
 ```
 OpenFilesNavigator/
 ├── src/com/pardha/openfiles/
-│   ├── OpenFilesTopComponent.java   # Main panel — all view logic, stash, context menus
-│   ├── OpenFilesCellRenderer.java   # List cell renderer
-│   ├── PluginPrefs.java             # All persistence (java.util.prefs) — includes stash, deploy order
-│   ├── FuzzyMatcher.java            # Fuzzy search utility (used by panel filter)
-│   ├── OpenFilesAction.java         # Menu action entry point
-│   ├── QuickFileSearchDialog.java   # Ctrl+P quick file search popup
-│   ├── QuickFileSearchAction.java   # Action binding for Ctrl+P
-│   ├── FindApiFileAction.java       # RMB "Find File" in PL/SQL editors
-│   ├── FormatApiNameAction.java     # RMB "Format API Name" in PL/SQL editors
-│   ├── layer.xml                    # NetBeans layer registration
-│   └── Bundle.properties            # Localisation strings
+│   ├── OpenFilesTopComponent.java      # Main panel — all view logic, stash, context menus
+│   ├── OpenFilesCellRenderer.java      # List cell renderer
+│   ├── PluginPrefs.java                # All persistence (java.util.prefs) — includes stash, deploy order
+│   ├── FuzzyMatcher.java               # Fuzzy search utility (used by panel filter)
+│   ├── ModuleDependencyTreePanel.java  # Module dependency explorer window
+│   ├── OpenFilesAction.java            # Menu action entry point
+│   ├── QuickFileSearchDialog.java      # Alt+P quick file search popup
+│   ├── QuickFileSearchAction.java      # Action binding for Alt+P
+│   ├── FindApiFileAction.java          # RMB "Find File" in PL/SQL editors
+│   ├── FormatApiNameAction.java        # RMB "Format API Name" in PL/SQL editors
+│   ├── layer.xml                       # NetBeans layer registration
+│   └── Bundle.properties               # Localisation strings
 ├── nbproject/
-│   ├── project.xml                  # Module dependencies
-│   └── platform.properties          # Points to IFS DS18 harness
+│   ├── project.xml                     # Module dependencies
+│   └── platform.properties             # Points to IFS DS18 harness
 ├── .gitignore
 ├── build.xml
 └── manifest.mf
@@ -207,4 +218,4 @@ OpenFilesNavigator/
 3. Select the NBM and click **Install**
 4. Restart the IDE
 5. Open via **Window → Open Files Navigator** or `Ctrl+Shift+O`
-6. Use **Ctrl+P** to open Quick File Search at any time
+6. Use **Alt+P** to open Quick File Search at any time

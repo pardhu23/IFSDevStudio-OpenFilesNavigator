@@ -50,5 +50,9 @@
             <attr name="originalFile"
                   stringvalue="Actions/Window/com-pardha-openfiles-OpenFilesAction.instance"/>
         </file>
+        <file name="A-P.shadow">
+            <attr name="originalFile"
+                  stringvalue="Actions/File/com-pardha-openfiles-QuickFileSearchAction.instance"/>
+        </file>
     </folder>
 </filesystem>

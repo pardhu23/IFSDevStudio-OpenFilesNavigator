@@ -23,7 +23,8 @@ import org.openide.util.NbBundle.Messages;
 )
 @ActionReferences({
     @ActionReference(path = "Menu/File", position = 1300, separatorBefore = 1290),
-    @ActionReference(path = "Shortcuts", name = "D-P")   // D- = Ctrl on all platforms
+    //@ActionReference(path = "Shortcuts", name = "D-P"),    // Ctrl+P 
+    @ActionReference(path = "Shortcuts", name = "A-P")       // Alt+P
 })
 @Messages("CTL_QuickFileSearchAction=Quick File Search")
 public final class QuickFileSearchAction implements ActionListener {
