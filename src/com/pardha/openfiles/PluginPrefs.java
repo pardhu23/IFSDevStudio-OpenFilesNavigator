@@ -22,6 +22,7 @@ import java.util.Locale;
  *     viewMode          = "LIST" | "TREE"         (default LIST)
  *     noteDisplay       = "TOOLTIP" | "INLINE"    (default TOOLTIP)
  *     buildGrouping     = "INLINE" | "GROUPED"    (default INLINE)
+ *     autoScanOnStartup = true | false            (default true)
  *
  *   /com/pardha/openfiles/pins
  *     0 = &lt;tcKey&gt;, 1 = &lt;tcKey&gt;, …   (ordered)
@@ -124,6 +125,9 @@ public final class PluginPrefs {
    //Default deployment extension order.
    private static final String DEPLOY_ORDER_DEFAULT
            = "cre,cdb,api,apv,apy,entity,utility,ins,projection,fragment,plsvc,client";
+
+   /** Whether to auto-scan on IDE startup. Default true. */
+   private static final String KEY_AUTO_SCAN = "autoScanOnStartup";
 
    public static String getIndexExtensions() {
       return root().get(KEY_INDEX_EXTENSIONS, INDEX_EXTENSIONS_DEFAULT);
@@ -278,6 +282,22 @@ public final class PluginPrefs {
 
    public static void setClosedStripOpen(boolean open) {
       root().putBoolean(KEY_CLOSED_STRIP_OPEN, open);
+      flush(root());
+   }
+
+   // ── Auto-scan on startup ──────────────────────────────────────────────
+   /**
+    * When {@code false} (default), the file index is built eagerly in the
+    * background as soon as the IDE opens the Open Files Navigator panel.
+    * When {@code false}, indexing is deferred until the Quick File Search
+    * dialog is first opened by the user.
+    */
+   public static boolean isAutoScanEnabled() {
+      return root().getBoolean(KEY_AUTO_SCAN, false);
+   }
+
+   public static void setAutoScanEnabled(boolean enabled) {
+      root().putBoolean(KEY_AUTO_SCAN, enabled);
       flush(root());
    }
 

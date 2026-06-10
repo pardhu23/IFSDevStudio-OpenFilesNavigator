@@ -193,6 +193,7 @@ public final class QuickFileSearchDialog extends JDialog {
     */
    private static volatile List<FileEntry> mergedCache = Collections.emptyList();
    private static volatile boolean mergedCacheStale = true;
+   private static volatile boolean refreshInProgress = false;
 
    /**
     * Debounce timer that fires MERGE_DEBOUNCE_MS after the last cache completion.
@@ -208,7 +209,7 @@ public final class QuickFileSearchDialog extends JDialog {
    private static long indexingStartedAt = 0;
 
    // ── Gate: prevents double-indexing on startup ─────────────────────────────
-   private static final AtomicBoolean indexingEverStarted = new AtomicBoolean(false);
+   static final AtomicBoolean indexingEverStarted = new AtomicBoolean(false);
 
    // ── Watchers ──────────────────────────────────────────────────────────────
    private static org.openide.filesystems.FileChangeListener custWatcher = null;
@@ -231,6 +232,12 @@ public final class QuickFileSearchDialog extends JDialog {
    // Public API
    // =========================================================================
    public static void ensureIndexed() {
+      if (isCacheReady()) {
+         return;
+      }
+      if (indexingEverStarted.get()) {
+         SwingUtilities.invokeLater(() -> scheduleCacheBuilds(null));
+      }
       boolean allReady = custCache != null && !custCacheStale
               && buildCache != null
               && coreCache != null;
@@ -240,13 +247,12 @@ public final class QuickFileSearchDialog extends JDialog {
 
       boolean firstCall = indexingEverStarted.compareAndSet(false, true);
       if (!firstCall) {
-         scheduleCacheBuilds(null);
+         SwingUtilities.invokeLater(() -> scheduleCacheBuilds(null));
          return;
       }
 
-      indexingStartedAt = System.currentTimeMillis();
       System.err.println("[QuickFileSearch] ensureIndexed — first call, launching background init");
-      new Thread(() -> scheduleCacheBuilds(null), "QuickFileSearch-InitGate").start();
+      SwingUtilities.invokeLater(() -> scheduleCacheBuilds(null));
    }
 
    public static void seedInitialCoreRoots() {
@@ -254,6 +260,18 @@ public final class QuickFileSearchDialog extends JDialog {
          cachedCoreRoots.addAll(computeActiveCoreRootsOffEdt());
          System.err.println("[QuickFileSearch] Initial core roots: " + cachedCoreRoots);
       }
+   }
+
+   public static boolean isCacheReady() {
+      return custCache != null && !custCacheStale
+              && buildCache != null
+              && coreCache != null;
+   }
+
+   public static void scheduleCacheBuildsPublic(Runnable onDone) {
+      SwingUtilities.invokeLater(() -> {
+         scheduleCacheBuilds(onDone);
+      });
    }
 
    public static void onOpenProjectsChanged() {
@@ -286,13 +304,15 @@ public final class QuickFileSearchDialog extends JDialog {
                cachedCoreRoots.clear();
                cachedCoreRoots.addAll(neededRoots);
             }
-
-            scheduleCacheBuilds(null);
+            if (PluginPrefs.isAutoScanEnabled() && indexingEverStarted.get()) {
+               scheduleCacheBuilds(null);
+            }
          });
       }, "QuickFileSearch-ProjectChangeChecker").start();
    }
 
    public static void refreshAllCachesStatic(Runnable onComplete) {
+      refreshInProgress = true;
       unregisterWatchers();
       custCache = null;
       custCacheStale = true;
@@ -302,13 +322,22 @@ public final class QuickFileSearchDialog extends JDialog {
       mergedCacheStale = true;
       cachedCoreRoots.clear();
       indexingStartedAt = System.currentTimeMillis();
+      indexingEverStarted.set(false);
       coreDiskCacheFile().delete();
       custDiskCacheFile().delete();
       custDirtyFlagFile().delete();
 
       new Thread(() -> {
-         cachedCoreRoots.addAll(computeActiveCoreRootsOffEdt());
-         SwingUtilities.invokeLater(() -> scheduleCacheBuilds(onComplete));
+         Set<String> roots = computeActiveCoreRootsOffEdt();
+         SwingUtilities.invokeLater(() -> {
+            cachedCoreRoots.addAll(roots);  // ← populate BEFORE scheduling builds
+            scheduleCacheBuilds(() -> {
+               refreshInProgress = false;  // ← clear only after builds complete
+               if (onComplete != null) {
+                  onComplete.run();
+               }
+            });
+         });
       }, "QuickFileSearch-RefreshInit").start();
    }
 
@@ -337,7 +366,9 @@ public final class QuickFileSearchDialog extends JDialog {
          }
          return;
       }
-
+      if (indexingStartedAt == 0) {
+         indexingStartedAt = System.currentTimeMillis();
+      }
       if (onAllDone != null) {
          int count = (needCust ? 1 : 0) + (needBuild ? 1 : 0) + (needCore ? 1 : 0);
          AtomicInteger pending = new AtomicInteger(count);
@@ -855,8 +886,11 @@ public final class QuickFileSearchDialog extends JDialog {
       mergedCacheStale = false;
 
       if (custCache != null && buildCache != null && coreCache != null) {
+         long elapsed = indexingStartedAt > 0
+                 ? (System.currentTimeMillis() - indexingStartedAt)
+                 : -1;
          System.err.println("[QuickFileSearch] All caches ready — total: "
-                 + (System.currentTimeMillis() - indexingStartedAt) + "ms | "
+                 + (elapsed >= 0 ? elapsed + "ms" : "n/a (disk cache)") + " | "
                  + "cust=" + custCache.size()
                  + " build=" + buildCache.size()
                  + " core=" + coreCache.size()
@@ -1528,16 +1562,23 @@ public final class QuickFileSearchDialog extends JDialog {
 
    /**
     * Ensures caches are building if needed.
-    *
-    * <p>
-    * FIX vs old code: delegates entirely to {@code scheduleCacheBuilds()} which
-    * has the proper deduplication guards, instead of calling the individual
-    * {@code buildXxxCacheAsync()} methods directly and racing with the background
-    * init thread started from {@code ensureIndexed()}.
     */
    private void ensureCacheForDialog() {
       scheduleQueryUpdate();
-      scheduleCacheBuilds(this::scheduleQueryUpdate);
+      if (refreshInProgress) {
+         return;
+      }
+      if (cachedCoreRoots.isEmpty() && !indexingEverStarted.get()) {
+         new Thread(() -> {
+            QuickFileSearchDialog.seedInitialCoreRoots();
+            SwingUtilities.invokeLater(() -> {
+               indexingEverStarted.set(true);
+               scheduleCacheBuilds(this::scheduleQueryUpdate);
+            });
+         }, "QuickFileSearch-DialogInitGate").start();
+      } else {
+         scheduleCacheBuilds(this::scheduleQueryUpdate);
+      }
    }
 
    // =========================================================================
