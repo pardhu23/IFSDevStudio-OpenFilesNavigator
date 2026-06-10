@@ -33,6 +33,7 @@ RMB Options:
 - **User groups** — organize files into named collapsible sections; rename, delete, and reorder groups from the Settings dialog
 - **Color tags** — Red / Orange / Green / Blue / Purple for visual status; shown as a stripe in list view and a dot in tree view
 - **Notes** — attach a short note to any file; configurable display as tooltip, inline `✎` indicator, or subtitle row below the filename
+- **Sort** (`⇅` toolbar button) — four sort modes: **Name A→Z**, **Open order**, **Recently activated** (re-ranks live as you switch files), **File type** (grouped by extension)
 - **Recently Closed** — reopen accidentally closed files; auto-expands on close, auto-collapses after 5 seconds; history size configurable (1–20)
 - **IFS actions** — Generate Code, Generate & Deploy, Generate & Deploy with Dependents, Execute PL/SQL — triggered directly from the panel context menu
 - **Ordered multi-file deploy** — when deploying multiple files, they are processed sequentially in a configurable extension order (e.g. `.cre` → `.api` → `.plsql`); same order applies to Execute PL/SQL on multiple build files
@@ -40,8 +41,8 @@ RMB Options:
 - **Build file detection** — generated files (paths containing `/build/`) shown italic in slate-blue; optionally grouped under a separate "Generated" section
 - **Close button** — × button on every file row in both list and tree views
 
-### Quick File Search (`Alt+P`)
-Press **Alt+P** anywhere in IFS Developer Studio to open a floating search popup.  
+### Quick File Search (`Alt+P` / `Ctrl+P`)
+Press **Alt+P** or **Ctrl+P** anywhere in IFS Developer Studio to open a floating search popup.  
 Type any part of a filename — results update on every keystroke.  
 Press **Enter** or click to open the file. **Escape** dismisses.  
 The 🔍 button in the Open Files panel toolbar also opens the dialog. 
@@ -49,7 +50,7 @@ The ⇄ button converts a pasted `_API` / `_SYS` / `_SVC` package name to Pascal
 The ↻ button inside the dialog manually refreshes all caches.
 
 #### Search behaviour
-- **Strict substring/prefix matching** — no fuzzy noise; only files whose base name starts with or contains your query are shown
+- **Fuzzy in-order matching** — every character in your query must appear in the filename in order, but gaps are allowed; `CO` matches `CustomerOrder`, `POL` matches `PurchaseOrderLine`
 - Results are ranked by IFS naming convention:
 
 | Rank | File type | Example |
@@ -96,6 +97,21 @@ Additional details:
 - Any open NetBeans project without a `workspace/` subdirectory (plain Java projects, plugin projects, etc.) is excluded from indexing and watching entirely
 - Multiple projects pointing to the same core checkout are deduplicated — each unique path is walked exactly once
 - Excluded from indexing: `server/` directories directly under any `workspace/<module>/` or `checkout/<module>/` path (lobby, configuration and report related `.xsd`, `.rdl` etc.)
+
+### Git Status Strip
+
+An embedded collapsible strip at the bottom of the Open Files panel. Click the `▼ Git Status` header to expand or collapse it.
+
+- **Staged / Unstaged / Untracked** — changed files grouped into three sections with per-section counts
+- **Count summary** — header shows `A N  M N  D N  R N` (added, modified, deleted, renamed) even when collapsed
+- **Filter** — type to narrow files within the strip
+- **Context menu** — **Stage** (`git add`), **Unstage** (`git restore --staged`), **Discard changes** (`git restore`), **Show in Project**
+- **Branch switching** — click the `⎇ branchName` label to open a local-branch popup; selecting a branch runs `git checkout` and refreshes the status
+- **Multi-project** — aggregates status across all open IFS projects in the workspace
+
+The strip runs `git status --porcelain` directly via `ProcessBuilder` (not the NetBeans Git plugin) for sub-second response times. If Git is not on your `PATH`, set the executable path in **Settings → Git executable**.
+
+---
 
 ### Stash / Restore
 Press the 🗃 toolbar button to snapshot your current open files, close them all, and restore them later — like `git stash` for your editor tabs.
@@ -179,10 +195,11 @@ Open via the ⚙ button in the Open Files panel toolbar.
 | **Note display** | Tooltip / Inline `✎` / Subtitle | How file notes appear in the list |
 | **Generated files** | Inline / Grouped | Show build files inline or under a "Generated" section |
 | **Tree grouping** | Folder path / IFS component | How ungrouped files are grouped in tree view |
-| **List sort order** | Alphabetical / Open order | Sort open files alphabetically or by the order they were opened |
+| **List sort order** | Name A→Z / Open order / Recently activated / File type | Sort open files; "Recently activated" re-ranks live as you switch files |
 | **Generate & Deploy order** | Comma-separated extension list (wrapping text area) | Extension order for sequential multi-file deploy and Execute PL/SQL; unlisted extensions go last (A–Z). Default: `cre,cdb,api,apv,apy,entity,utility,ins,projection,fragment,plsvc,client` |
 | **Recently closed history** | 1–20 files | How many recently closed files to remember |
 | **Manage groups** | Add / Rename / Delete | Create and manage named file groups |
+| **Git executable** | Path string | Override the `git` executable path if it is not on the system `PATH` |
 
 ---
 
@@ -193,12 +210,13 @@ OpenFilesNavigator/
 ├── src/com/pardha/openfiles/
 │   ├── OpenFilesTopComponent.java      # Main panel — all view logic, stash, context menus
 │   ├── OpenFilesCellRenderer.java      # List cell renderer
+│   ├── GitStatusPanel.java             # Embedded git status strip (staged/unstaged/untracked)
 │   ├── PluginPrefs.java                # All persistence (java.util.prefs) — includes stash, deploy order
-│   ├── FuzzyMatcher.java               # Fuzzy search utility (used by panel filter)
+│   ├── FuzzyMatcher.java               # Fuzzy search utility (used by panel filter and quick search)
 │   ├── ModuleDependencyTreePanel.java  # Module dependency explorer window
 │   ├── OpenFilesAction.java            # Menu action entry point
 │   ├── QuickFileSearchDialog.java      # Alt+P quick file search popup
-│   ├── QuickFileSearchAction.java      # Action binding for Alt+P
+│   ├── QuickFileSearchAction.java      # Action binding for Alt+P / Ctrl+P
 │   ├── FindApiFileAction.java          # RMB "Find File" in PL/SQL editors
 │   ├── FormatApiNameAction.java        # RMB "Format API Name" in PL/SQL editors
 │   ├── layer.xml                       # NetBeans layer registration
@@ -217,5 +235,5 @@ OpenFilesNavigator/
 2. In IFS Developer Studio: **Tools → Plugins → Downloaded → Add Plugins**
 3. Select the NBM and click **Install**
 4. Restart the IDE
-5. Open via **Window → Open Files Navigator** or `Ctrl+Shift+O`
-6. Use **Alt+P** to open Quick File Search at any time
+5. Open via **Window → Open Files Navigator** or `Alt+Shift+O`
+6. Use **Alt+P** or **Ctrl+P** to open Quick File Search at any time

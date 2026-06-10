@@ -1,3 +1,4 @@
+// Context: see docs/ifs-actions.md
 package com.pardha.openfiles;
 
 import java.awt.event.ActionEvent;

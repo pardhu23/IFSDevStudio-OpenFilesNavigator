@@ -1,3 +1,4 @@
+// Context: see docs/quick-search.md
 package com.pardha.openfiles;
 
 /**

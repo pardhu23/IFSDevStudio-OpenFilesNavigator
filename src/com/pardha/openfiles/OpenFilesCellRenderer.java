@@ -1,3 +1,4 @@
+// Context: see docs/cell-renderer.md
 package com.pardha.openfiles;
 
 import java.awt.*;

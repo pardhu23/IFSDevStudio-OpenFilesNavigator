@@ -1,3 +1,4 @@
+// Context: see docs/main-panel.md
 package com.pardha.openfiles;
 
 import static com.pardha.openfiles.PluginPrefs.TagColor.BLUE;
@@ -95,6 +96,10 @@ public final class OpenFilesTopComponent extends TopComponent {
    private static final String CARD_TREE = "tree";
 
    private JButton stashBtn;
+   private JButton sortBtn;
+
+   private final java.util.concurrent.ConcurrentHashMap<String, Long> activationTimestamps
+           = new java.util.concurrent.ConcurrentHashMap<>();
 
    // ── Recently-closed strip ─────────────────────────────────────────────
    private final JPanel closedStripWrapper = new JPanel(new BorderLayout());
@@ -102,6 +107,16 @@ public final class OpenFilesTopComponent extends TopComponent {
    private final JPanel closedStripBody = new JPanel();
    private static final int CLOSED_ROW_H = 24;
    private javax.swing.Timer closedAutoCollapseTimer;
+
+   // ── Git status strip ──────────────────────────────────────────────────
+   private final JPanel gitStripWrapper = new JPanel(new BorderLayout());
+   private final JPanel gitStripHeader = new JPanel(new BorderLayout());
+   private final JPanel gitStripBody = new JPanel(new BorderLayout());
+   private final JLabel gitStripHeaderLabel = new JLabel();
+   private final JLabel gitBranchLabel = new JLabel();
+   private GitStatusPanel gitPanel;
+   private JSplitPane mainSplit;
+   private static final int GIT_BODY_H = 220;
 
    // ── Refresh coalescing ────────────────────────────────────────────────
    private RequestProcessor.Task pendingRefresh;
@@ -211,11 +226,6 @@ public final class OpenFilesTopComponent extends TopComponent {
       northPanel.setBorder(new EmptyBorder(4, 4, 4, 4));
       northPanel.setBackground(UIManager.getColor("Panel.background"));
 
-      JPanel titleRow = new JPanel(new BorderLayout());
-      titleRow.setOpaque(false);
-      JLabel header = new JLabel("Open Files");
-      header.setFont(header.getFont().deriveFont(Font.BOLD, 11f));
-      titleRow.add(header, BorderLayout.WEST);
 
       ButtonGroup bg = new ButtonGroup();
       bg.add(listBtn);
@@ -249,21 +259,31 @@ public final class OpenFilesTopComponent extends TopComponent {
       quickSearchBtn.setToolTipText("Quick File Search (Ctrl+P)");
       quickSearchBtn.addActionListener(e -> QuickFileSearchDialog.showDialog());
 
-      JButton depTreeBtn = new JButton("Module Links");
-      depTreeBtn.setToolTipText("Show IFS Module Dependencies (based on MODULE_DEPENDENCY_TAB)");
+      JButton depTreeBtn = new JButton("🔗"); // 🔗
+      depTreeBtn.setFocusable(false);
+      depTreeBtn.setMargin(new Insets(1, 4, 1, 4));
+      depTreeBtn.setFont(depTreeBtn.getFont().deriveFont(12f));
+      depTreeBtn.setToolTipText("Module Dependencies");
       depTreeBtn.addActionListener(e -> ModuleDependencyTreePanel.openWindow());
 
-      JPanel btnPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
+
+      sortBtn = new JButton("⇅"); // ⇅
+      sortBtn.setFocusable(false);
+      sortBtn.setMargin(new Insets(1, 4, 1, 4));
+      sortBtn.setFont(sortBtn.getFont().deriveFont(12f));
+      sortBtn.setToolTipText(sortModeLabel());
+      sortBtn.addActionListener(e -> showSortPopup(sortBtn));
+
+      JPanel btnPanel = new JPanel(new WrapLayout(FlowLayout.LEFT, 2, 1));
       btnPanel.setOpaque(false);
       btnPanel.add(listBtn);
       btnPanel.add(treeBtn);
-      btnPanel.add(Box.createHorizontalStrut(4));
       btnPanel.add(quickSearchBtn);
       btnPanel.add(stashBtn);
       btnPanel.add(settingsBtn);
       btnPanel.add(depTreeBtn);
-      titleRow.add(btnPanel, BorderLayout.EAST);
-      northPanel.add(titleRow, BorderLayout.NORTH);
+      btnPanel.add(sortBtn);
+      northPanel.add(btnPanel, BorderLayout.NORTH);
 
       searchField.setToolTipText("Fuzzy filter files (Esc to clear)");
       searchField.putClientProperty("JTextField.placeholderText", "Search\u2026");
@@ -301,9 +321,16 @@ public final class OpenFilesTopComponent extends TopComponent {
       setupTreeView();
       centerPanel.add(listScroll, CARD_LIST);
       centerPanel.add(treeScroll, CARD_TREE);
-      add(centerPanel, BorderLayout.CENTER);
 
       setupClosedStrip();
+      setupGitStrip();
+
+      mainSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, centerPanel, gitStripWrapper);
+      mainSplit.setBorder(null);
+      mainSplit.setDividerSize(4);
+      mainSplit.setResizeWeight(1.0);
+      mainSplit.setContinuousLayout(true);
+      add(mainSplit, BorderLayout.CENTER);
       add(closedStripWrapper, BorderLayout.SOUTH);
 
       CardLayout cl = (CardLayout) centerPanel.getLayout();
@@ -760,6 +787,171 @@ public final class OpenFilesTopComponent extends TopComponent {
       closedAutoCollapseTimer.restart();
    }
 
+   // =========================================================================
+   // Git status strip
+   // =========================================================================
+   private void setupGitStrip() {
+      gitStripWrapper.setOpaque(false);
+      gitStripWrapper.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0,
+              UIManager.getColor("Separator.foreground") != null
+              ? UIManager.getColor("Separator.foreground")
+              : new Color(180, 180, 180)));
+
+      gitStripHeader.setOpaque(true);
+      Color hdrBg = UIManager.getColor("Panel.background");
+      if (hdrBg == null) {
+         hdrBg = new Color(240, 240, 240);
+      }
+      gitStripHeader.setBackground(blend(hdrBg, new Color(128, 128, 128), 0.06f));
+      gitStripHeader.setBorder(new EmptyBorder(2, 6, 2, 4));
+      gitStripHeader.setPreferredSize(new Dimension(0, 22));
+
+      gitStripHeaderLabel.setFont(gitStripHeaderLabel.getFont().deriveFont(Font.BOLD, 11f));
+      updateGitStripHeaderLabel();
+      gitStripHeader.add(gitStripHeaderLabel, BorderLayout.CENTER);
+
+      gitBranchLabel.setFont(gitBranchLabel.getFont().deriveFont(Font.PLAIN, 10f));
+      gitBranchLabel.setToolTipText("Click to switch branch");
+      gitBranchLabel.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+      gitBranchLabel.setBorder(new EmptyBorder(0, 4, 0, 6));
+      gitBranchLabel.setVisible(false);
+      gitBranchLabel.addMouseListener(new MouseAdapter() {
+         @Override
+         public void mousePressed(MouseEvent e) { showBranchPopup(e); }
+      });
+      gitStripHeader.add(gitBranchLabel, BorderLayout.EAST);
+
+      MouseAdapter toggle = new MouseAdapter() {
+         @Override
+         public void mousePressed(MouseEvent e) {
+            // Don't toggle when clicking the branch label (it has its own listener)
+            if (e.getSource() != gitBranchLabel) { toggleGitStrip(); }
+         }
+      };
+      gitStripHeader.addMouseListener(toggle);
+      gitStripHeaderLabel.addMouseListener(toggle);
+
+      gitStripWrapper.setMinimumSize(new Dimension(0, 22));
+
+      gitStripWrapper.add(gitStripHeader, BorderLayout.NORTH);
+      gitStripWrapper.add(gitStripBody, BorderLayout.CENTER);
+
+      boolean open = PluginPrefs.isGitStripOpen();
+      gitStripBody.setVisible(open);
+      if (open) {
+         ensureGitPanel();
+      }
+   }
+
+   private void ensureGitPanel() {
+      if (gitPanel == null) {
+         gitPanel = new GitStatusPanel();
+         gitPanel.setOnCountsChanged(this::updateGitStripHeaderLabel);
+         gitStripBody.add(gitPanel, BorderLayout.CENTER);
+         gitStripBody.revalidate();
+      }
+   }
+
+   private void toggleGitStrip() {
+      boolean nowOpen = !gitStripBody.isVisible();
+      if (nowOpen) {
+         ensureGitPanel();
+      }
+      gitStripBody.setVisible(nowOpen);
+      PluginPrefs.setGitStripOpen(nowOpen);
+      updateGitStripHeaderLabel();
+      SwingUtilities.invokeLater(() -> applySplitDivider(nowOpen));
+   }
+
+   private void applySplitDivider(boolean gitOpen) {
+      if (mainSplit == null || mainSplit.getHeight() == 0) {
+         return;
+      }
+      int total = mainSplit.getHeight();
+      int divSize = mainSplit.getDividerSize();
+      int loc;
+      if (gitOpen) {
+         loc = total - GIT_BODY_H - divSize;
+      } else {
+         // Leave exactly the header height so it stays visible
+         loc = total - gitStripHeader.getPreferredSize().height - divSize;
+      }
+      mainSplit.setDividerLocation(Math.max(0, loc));
+      mainSplit.revalidate();
+      mainSplit.repaint();
+   }
+
+   private void updateGitStripHeaderLabel() {
+      boolean open = gitStripBody.isVisible();
+      String arrow = open ? "▼ " : "▶ ";
+      String title = "Git Status";
+      if (gitPanel != null) {
+         String summary = gitPanel.getCountSummary();
+         if (!summary.isEmpty()) {
+            title += "   " + summary;
+         }
+         String branch = gitPanel.getCurrentBranch();
+         gitBranchLabel.setText("⎇ " + branch);
+         gitBranchLabel.setVisible(!branch.isEmpty());
+      }
+      gitStripHeaderLabel.setText(arrow + title);
+   }
+
+   private void showBranchPopup(MouseEvent e) {
+      if (gitPanel == null) { return; }
+      java.util.List<String> branches = gitPanel.getLocalBranches();
+      if (branches.isEmpty()) { return; }
+      String current = gitPanel.getCurrentBranch();
+      JPopupMenu menu = new JPopupMenu();
+      for (String branch : branches) {
+         JCheckBoxMenuItem item = new JCheckBoxMenuItem(branch, branch.equals(current));
+         if (branch.equals(current)) {
+            item.setEnabled(false);
+         } else {
+            item.addActionListener(ev -> {
+               int res = JOptionPane.showConfirmDialog(this,
+                       "Switch to branch “" + branch + "”?",
+                       "Switch Branch", JOptionPane.YES_NO_OPTION);
+               if (res == JOptionPane.YES_OPTION) {
+                  gitPanel.checkoutBranch(branch);
+               }
+            });
+         }
+         menu.add(item);
+      }
+      menu.show(gitBranchLabel, 0, gitBranchLabel.getHeight());
+   }
+
+   private void showSortPopup(JButton anchor) {
+      String current = PluginPrefs.getListSort();
+      JPopupMenu menu = new JPopupMenu();
+      for (String[] m : new String[][]{
+         {PluginPrefs.LIST_SORT_ALPHA,       "Name A → Z"},
+         {PluginPrefs.LIST_SORT_OPEN_ORDER,  "Open order"},
+         {PluginPrefs.LIST_SORT_RECENT,      "Recently activated"},
+         {PluginPrefs.LIST_SORT_TYPE,        "File type"}
+      }) {
+         JCheckBoxMenuItem item = new JCheckBoxMenuItem(m[1], current.equals(m[0]));
+         final String key = m[0];
+         item.addActionListener(ev -> {
+            PluginPrefs.setListSort(key);
+            if (sortBtn != null) { sortBtn.setToolTipText(sortModeLabel()); }
+            refreshList();
+         });
+         menu.add(item);
+      }
+      menu.show(anchor, 0, anchor.getHeight());
+   }
+
+   private String sortModeLabel() {
+      switch (PluginPrefs.getListSort()) {
+         case PluginPrefs.LIST_SORT_OPEN_ORDER: return "Sort: Open order";
+         case PluginPrefs.LIST_SORT_RECENT:     return "Sort: Recently activated";
+         case PluginPrefs.LIST_SORT_TYPE:       return "Sort: File type";
+         default:                               return "Sort: Name A→Z";
+      }
+   }
+
    private static Color blend(Color a, Color b, float t) {
       int r = Math.round(a.getRed() + t * (b.getRed() - a.getRed()));
       int g = Math.round(a.getGreen() + t * (b.getGreen() - a.getGreen()));
@@ -893,6 +1085,17 @@ public final class OpenFilesTopComponent extends TopComponent {
       content.add(deployHint);
       content.add(Box.createVerticalStrut(10));
 
+      // ── Git executable path ───────────────────────────────────────────────
+      addSectionLabel(content, "Git — executable path:");
+      JTextField gitPathField = new JTextField(PluginPrefs.getGitPath());
+      gitPathField.setAlignmentX(Component.LEFT_ALIGNMENT);
+      gitPathField.setMaximumSize(new Dimension(Integer.MAX_VALUE, gitPathField.getPreferredSize().height));
+      JLabel gitPathHint = hint("Full path to git.exe, e.g.  C:\\Program Files\\Git\\bin\\git.exe  (leave blank to auto-detect)");
+      content.add(gitPathField);
+      content.add(Box.createVerticalStrut(2));
+      content.add(gitPathHint);
+      content.add(Box.createVerticalStrut(10));
+
       // ── Recently-closed + Auto-scan (single rows) ─────────────────────────
       JPanel inlineRow1 = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
       inlineRow1.setOpaque(false);
@@ -1016,6 +1219,7 @@ public final class OpenFilesTopComponent extends TopComponent {
             PluginPrefs.setDeployOrder(newDeployOrder);
          }
          PluginPrefs.setAutoScanEnabled(autoScanCb.isSelected());
+         PluginPrefs.setGitPath(gitPathField.getText().trim());
          dlg.dispose();
       });
       cancel.addActionListener(ev -> dlg.dispose());
@@ -1484,6 +1688,10 @@ public final class OpenFilesTopComponent extends TopComponent {
       }));
 
       menu.addSeparator();
+      menu.addSeparator();
+      if (single) {
+         menu.add(menuItem("Show in Project", e -> showInProject(targets.get(0))));
+      }
       menu.add(menuItem("Stash selected files\u2026", e -> stashTargets(targets)));
    }
 
@@ -1851,28 +2059,44 @@ public final class OpenFilesTopComponent extends TopComponent {
          }
       }
 
-      boolean openOrderSort = PluginPrefs.LIST_SORT_OPEN_ORDER.equals(PluginPrefs.getListSort());
-      if (openOrderSort) {
-         java.util.List<TopComponent> ordered = new ArrayList<>(openOrder);
-         ordered.retainAll(new java.util.HashSet<>(allEditors));
-         java.util.List<TopComponent> remainder = new ArrayList<>(allEditors);
-         remainder.removeAll(new java.util.HashSet<>(ordered));
-         remainder.sort(Comparator.comparing(
-                 tc -> {
-                    String n = resolveDisplayName(tc);
-                    return n != null ? n : "";
-                 },
-                 String.CASE_INSENSITIVE_ORDER));
-         allEditors.clear();
-         allEditors.addAll(ordered);
-         allEditors.addAll(remainder);
-      } else {
-         allEditors.sort(Comparator.comparing(
-                 tc -> {
-                    String n = resolveDisplayName(tc);
-                    return n != null ? n : "";
-                 },
-                 String.CASE_INSENSITIVE_ORDER));
+      String sortMode = PluginPrefs.getListSort();
+      switch (sortMode) {
+         case PluginPrefs.LIST_SORT_OPEN_ORDER: {
+            java.util.List<TopComponent> ordered = new ArrayList<>(openOrder);
+            ordered.retainAll(new java.util.HashSet<>(allEditors));
+            java.util.List<TopComponent> remainder = new ArrayList<>(allEditors);
+            remainder.removeAll(new java.util.HashSet<>(ordered));
+            remainder.sort(Comparator.comparing(
+                    tc -> { String n = resolveDisplayName(tc); return n != null ? n : ""; },
+                    String.CASE_INSENSITIVE_ORDER));
+            allEditors.clear();
+            allEditors.addAll(ordered);
+            allEditors.addAll(remainder);
+            break;
+         }
+         case PluginPrefs.LIST_SORT_RECENT:
+            allEditors.sort((a, b) -> {
+               long ta = activationTimestamps.getOrDefault(PluginPrefs.keyFor(a), 0L);
+               long tb = activationTimestamps.getOrDefault(PluginPrefs.keyFor(b), 0L);
+               return Long.compare(tb, ta);
+            });
+            break;
+         case PluginPrefs.LIST_SORT_TYPE:
+            allEditors.sort(Comparator.comparing((TopComponent tc) -> {
+               String n = resolveDisplayName(tc);
+               if (n == null) { return ""; }
+               int dot = n.lastIndexOf('.');
+               return dot >= 0 ? n.substring(dot + 1).toLowerCase(java.util.Locale.ROOT) : "";
+            }).thenComparing(tc -> {
+               String n = resolveDisplayName(tc);
+               return n != null ? n.toLowerCase(java.util.Locale.ROOT) : "";
+            }));
+            break;
+         default: // LIST_SORT_ALPHA
+            allEditors.sort(Comparator.comparing(
+                    tc -> { String n = resolveDisplayName(tc); return n != null ? n : ""; },
+                    String.CASE_INSENSITIVE_ORDER));
+            break;
       }
       applyFilter();
    }
@@ -2220,6 +2444,13 @@ public final class OpenFilesTopComponent extends TopComponent {
       if (active == null) {
          return;
       }
+      if (isEditorTC(active)) {
+         activationTimestamps.put(PluginPrefs.keyFor(active), System.currentTimeMillis());
+         if (PluginPrefs.LIST_SORT_RECENT.equals(PluginPrefs.getListSort())) {
+            refreshList();
+            return;
+         }
+      }
       if (viewMode == ViewMode.LIST) {
          for (int i = 0; i < listModel.getSize(); i++) {
             if (listModel.getElementAt(i) == active) {
@@ -2429,6 +2660,121 @@ public final class OpenFilesTopComponent extends TopComponent {
       }
    }
 
+   // =========================================================================
+   // Show in Project / Files tree
+   // =========================================================================
+   private void showInProject(TopComponent tc) {
+      String tip = tc.getToolTipText();
+      if (tip == null || tip.trim().isEmpty()) {
+         JOptionPane.showMessageDialog(this,
+                 "Cannot locate file — no path available.",
+                 "Show in Project", JOptionPane.WARNING_MESSAGE);
+         return;
+      }
+
+      String path = tip.replace('\\', '/').trim()
+              .replaceAll("<[^>]+>", "").trim()
+              .replaceAll("\\s+[\\(\\[][^\\)\\]]*[\\)\\]]\\s*$", "").trim();
+      if (path.isEmpty()) {
+         return;
+      }
+
+      try {
+         java.io.File file = FileUtil.normalizeFile(
+                 new java.io.File(path.replace('/', java.io.File.separatorChar)));
+         if (!file.exists()) {
+            JOptionPane.showMessageDialog(this,
+                    "File not found:\n" + path,
+                    "Show in Project", JOptionPane.WARNING_MESSAGE);
+            return;
+         }
+         FileObject fo = FileUtil.toFileObject(file);
+         if (fo == null) {
+            return;
+         }
+
+         DataObject dob = DataObject.find(fo);
+
+         // Read SelectInProjects action directly from config FS —
+         // it's registered as an instance file, not via Actions.forID
+         org.openide.filesystems.FileObject actionFile
+                 = org.openide.filesystems.FileUtil.getConfigFile(
+                         "Actions/Window/SelectDocumentNode/"
+                         + "org-netbeans-modules-project-ui-SelectInProjects.instance");
+
+         if (actionFile == null) {
+            JOptionPane.showMessageDialog(this,
+                    "SelectInProjects action not found in config FS.",
+                    "Show in Project", JOptionPane.WARNING_MESSAGE);
+            return;
+         }
+
+         // DataFiles.getAttribute("instanceCreate") returns the live action instance
+         Object obj = actionFile.getAttribute("instanceCreate");
+         if (!(obj instanceof javax.swing.Action)) {
+            JOptionPane.showMessageDialog(this,
+                    "Could not load SelectInProjects action instance.\nGot: "
+                    + (obj == null ? "null" : obj.getClass().getName()),
+                    "Show in Project", JOptionPane.WARNING_MESSAGE);
+            return;
+         }
+
+         javax.swing.Action action = (javax.swing.Action) obj;
+
+         // Activate the TC first so its node is the global selection
+         TopComponent targetTc = findOpenTcForFile(fo);
+         if (targetTc != null) {
+            targetTc.requestActive();
+         }
+
+         final javax.swing.Action finalAction = action;
+         final org.openide.nodes.Node node = dob.getNodeDelegate();
+         final Lookup nodeLookup = org.openide.util.lookup.Lookups.fixed(node, fo);
+
+         javax.swing.Timer t = new javax.swing.Timer(200, ev -> {
+            javax.swing.Action toFire = finalAction;
+            if (toFire instanceof ContextAwareAction) {
+               toFire = ((ContextAwareAction) toFire)
+                       .createContextAwareInstance(nodeLookup);
+            }
+            toFire.actionPerformed(new ActionEvent(
+                    this, ActionEvent.ACTION_PERFORMED, ""));
+         });
+         t.setRepeats(false);
+         t.start();
+
+      } catch (DataObjectNotFoundException ex) {
+         JOptionPane.showMessageDialog(this,
+                 "DataObject not found for:\n" + path,
+                 "Show in Project", JOptionPane.WARNING_MESSAGE);
+      } catch (Exception ex) {
+         System.err.println("[OpenFilesNavigator] showInProject failed: " + ex);
+         JOptionPane.showMessageDialog(this,
+                 "Failed:\n" + ex.getMessage(),
+                 "Show in Project", JOptionPane.WARNING_MESSAGE);
+      }
+   }
+
+   /**
+    * Returns the open TopComponent editor for a given FileObject, or null.
+    */
+   private TopComponent findOpenTcForFile(FileObject fo) {
+      String targetPath = fo.getPath().replace('\\', '/');
+      for (TopComponent tc : TopComponent.getRegistry().getOpened()) {
+         String tip = tc.getToolTipText();
+         if (tip == null) {
+            continue;
+         }
+         String normTip = tip.replace('\\', '/').trim()
+                 .replaceAll("<[^>]+>", "").trim()
+                 .replaceAll("\\s+[\\(\\[][^\\)\\]]*[\\)\\]]\\s*$", "").trim();
+         if (normTip.endsWith(targetPath) || normTip.equals(targetPath)) {
+            return tc;
+         }
+      }
+      return null;
+   }
+
    private java.io.File readCoreFilesRootForProject(java.io.File projectDir) {
       java.io.File[] candidates = {
          new java.io.File(projectDir, "nbproject/project.properties"),
@@ -2579,6 +2925,8 @@ public final class OpenFilesTopComponent extends TopComponent {
             });
          }, "OpenFilesNav-StartupInit").start();
       }
+
+      SwingUtilities.invokeLater(() -> applySplitDivider(PluginPrefs.isGitStripOpen()));
    }
 
    @Override
@@ -2938,4 +3286,66 @@ public final class OpenFilesTopComponent extends TopComponent {
       path = path.replaceAll("\\s+[\\(\\[][^\\)\\]]*[\\)\\]]\\s*$", "").trim();
       return path.isEmpty() ? null : path;
    }
+
+   // =========================================================================
+   // WrapLayout — FlowLayout that wraps to a new row when width is tight
+   // =========================================================================
+   private static final class WrapLayout extends FlowLayout {
+
+      WrapLayout(int align, int hgap, int vgap) {
+         super(align, hgap, vgap);
+      }
+
+      @Override
+      public Dimension preferredLayoutSize(Container target) {
+         return layoutSize(target, target.getWidth() > 0 ? target.getWidth() : Integer.MAX_VALUE);
+      }
+
+      @Override
+      public Dimension minimumLayoutSize(Container target) {
+         Dimension d = layoutSize(target, 0);
+         d.width -= (getHgap() + 1);
+         return d;
+      }
+
+      private Dimension layoutSize(Container target, int targetWidth) {
+         synchronized (target.getTreeLock()) {
+            int hgap = getHgap();
+            int vgap = getVgap();
+            Insets ins = target.getInsets();
+            int maxW = targetWidth - ins.left - ins.right - hgap * 2;
+            Dimension dim = new Dimension(0, 0);
+            int rowW = 0, rowH = 0;
+            for (int i = 0; i < target.getComponentCount(); i++) {
+               Component c = target.getComponent(i);
+               if (!c.isVisible()) { continue; }
+               Dimension d = c.getPreferredSize();
+               if (rowW + d.width > maxW && rowW > 0) {
+                  addRow(dim, rowW, rowH, vgap);
+                  rowW = 0;
+                  rowH = 0;
+               }
+               if (rowW > 0) { rowW += hgap; }
+               rowW += d.width;
+               rowH = Math.max(rowH, d.height);
+            }
+            addRow(dim, rowW, rowH, vgap);
+            dim.width += ins.left + ins.right + hgap * 2;
+            dim.height += ins.top + ins.bottom + vgap * 2;
+            // Tell parent to re-measure so the north panel grows when rows wrap
+            Container parent = target.getParent();
+            if (parent != null && target.isValid()) {
+               parent.revalidate();
+            }
+            return dim;
+         }
+      }
+
+      private static void addRow(Dimension dim, int w, int h, int vgap) {
+         dim.width = Math.max(dim.width, w);
+         if (dim.height > 0) { dim.height += vgap; }
+         dim.height += h;
+      }
+   }
+
 }

@@ -1,3 +1,4 @@
+// Context: see docs/persistence.md
 package com.pardha.openfiles;
 
 import java.util.Collections;
@@ -93,14 +94,10 @@ public final class PluginPrefs {
     */
    public static final String TREE_GROUP_COMPONENT = "COMPONENT";
 
-   /**
-    * List files sorted alphabetically by name (default).
-    */
-   public static final String LIST_SORT_ALPHA = "ALPHA";
-   /**
-    * List files sorted in the order they were opened (oldest first).
-    */
-   public static final String LIST_SORT_OPEN_ORDER = "OPEN_ORDER";
+   public static final String LIST_SORT_ALPHA       = "ALPHA";
+   public static final String LIST_SORT_OPEN_ORDER  = "OPEN_ORDER";
+   public static final String LIST_SORT_RECENT      = "RECENT";
+   public static final String LIST_SORT_TYPE        = "TYPE";
 
    /**
     * Default number of recently-closed files to remember.
@@ -128,6 +125,30 @@ public final class PluginPrefs {
 
    /** Whether to auto-scan on IDE startup. Default true. */
    private static final String KEY_AUTO_SCAN = "autoScanOnStartup";
+
+   /** User-configured path to the git executable. Empty = auto-detect. */
+   private static final String KEY_GIT_PATH = "gitPath";
+
+   /** Whether the git status strip is expanded. Default false. */
+   private static final String KEY_GIT_STRIP_OPEN = "gitStripOpen";
+
+   public static String getGitPath() {
+      return root().get(KEY_GIT_PATH, "");
+   }
+
+   public static void setGitPath(String path) {
+      root().put(KEY_GIT_PATH, path == null ? "" : path.trim());
+      flush(root());
+   }
+
+   public static boolean isGitStripOpen() {
+      return root().getBoolean(KEY_GIT_STRIP_OPEN, false);
+   }
+
+   public static void setGitStripOpen(boolean open) {
+      root().putBoolean(KEY_GIT_STRIP_OPEN, open);
+      flush(root());
+   }
 
    public static String getIndexExtensions() {
       return root().get(KEY_INDEX_EXTENSIONS, INDEX_EXTENSIONS_DEFAULT);
@@ -247,7 +268,10 @@ public final class PluginPrefs {
    // ── List sort order ───────────────────────────────────────────────────
    public static String getListSort() {
       String v = root().get(KEY_LIST_SORT, LIST_SORT_ALPHA);
-      return LIST_SORT_OPEN_ORDER.equals(v) ? LIST_SORT_OPEN_ORDER : LIST_SORT_ALPHA;
+      if (LIST_SORT_OPEN_ORDER.equals(v)) return LIST_SORT_OPEN_ORDER;
+      if (LIST_SORT_RECENT.equals(v))     return LIST_SORT_RECENT;
+      if (LIST_SORT_TYPE.equals(v))       return LIST_SORT_TYPE;
+      return LIST_SORT_ALPHA;
    }
 
    public static void setListSort(String mode) {
