@@ -198,7 +198,7 @@ Both fields are stored as typed — no uppercase conversion is applied.
 
 #### IFS: Insert Header Comment *(editor right-click — all file types)*
 
-Inserts a correctly-formatted IFS change-history comment line directly at the cursor line in the editor. No dialog is shown. The line ends with `": "` so you can type the description immediately.
+Inserts a correctly-formatted IFS change-history comment line directly at the cursor line in the editor. The line ends with `": "` so you can type the description immediately.
 
 ```
 --  260613  PAYEIN TEST_CRIM1: 
