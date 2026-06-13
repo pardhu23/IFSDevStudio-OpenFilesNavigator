@@ -7,11 +7,17 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.FileVisitResult;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.DosFileAttributes;
 import java.util.*;
 import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ForkJoinPool;
-import java.util.concurrent.RecursiveAction;
+import java.util.concurrent.ForkJoinTask;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.swing.*;
@@ -377,9 +383,7 @@ public final class QuickFileSearchDialog extends JDialog {
          }
          return;
       }
-      if (indexingStartedAt == 0) {
-         indexingStartedAt = System.currentTimeMillis();
-      }
+      indexingStartedAt = System.currentTimeMillis();
       if (onAllDone != null) {
          int count = (needCust ? 1 : 0) + (needBuild ? 1 : 0) + (needCore ? 1 : 0);
          AtomicInteger pending = new AtomicInteger(count);
@@ -472,9 +476,14 @@ public final class QuickFileSearchDialog extends JDialog {
             SwingUtilities.invokeLater(() -> {
                custCache = new ArrayList<>(finalEntries);
                custCacheBuilding = false;
-               registerCustWatcher(finalWorkspaceDirs, finalExts);
-               registerBuildWatcher(finalBuildDirs);
                scheduleMergedRebuild(onDone);
+               // addRecursiveListener walks the entire directory tree to register OS
+               // watches — on a 62K-file workspace this takes 40-50s on Windows and
+               // freezes the EDT. Do it on a background thread instead.
+               new Thread(() -> {
+                  registerCustWatcher(finalWorkspaceDirs, finalExts);
+                  registerBuildWatcher(finalBuildDirs);
+               }, "QuickFileSearch-WatcherRegistrar").start();
             });
          } catch (Exception ex) {
             System.err.println("[QuickFileSearch] Cust scan failed: " + ex);
@@ -1187,7 +1196,14 @@ public final class QuickFileSearchDialog extends JDialog {
    }
 
    // =========================================================================
-   // Parallel directory walker
+   // Parallel directory walker — NIO FileVisitor
+   //
+   // Files.walkFileTree on Windows populates BasicFileAttributes from the
+   // FindFirstFile/FindNextFile WIN32_FIND_DATA structure, so isDirectory and
+   // isHidden checks in the visitor are free — no extra GetFileAttributes call
+   // per file. This eliminates ~2 syscalls per file vs the old File.listFiles()
+   // + f.isDirectory() + f.isHidden() approach, saving significant AV overhead
+   // on large workspaces.
    // =========================================================================
    private static void walkParallel(File dir, String rootPath,
            List<FileEntry> result, Source source, Set<String> exts) {
@@ -1195,112 +1211,82 @@ public final class QuickFileSearchDialog extends JDialog {
       String normRoot = rootPath.replace('\\', '/');
       ConcurrentLinkedQueue<FileEntry> queue = new ConcurrentLinkedQueue<>();
 
-      File[] rootChildren = dir.listFiles();
-      if (rootChildren == null) {
+      // Enumerate top-level entries (O(modules) ≈ hundreds) to seed parallel tasks.
+      File[] topChildren = dir.listFiles();
+      if (topChildren == null) {
          return;
       }
 
-      List<WalkTask> topTasks = new ArrayList<>();
-      for (File f : rootChildren) {
-         if (f.isHidden()) {
-            continue;
-         }
-         String name = f.getName();
-         if (f.isDirectory()) {
-            if (shouldSkipDir(name, f)) {
+      List<ForkJoinTask<?>> tasks = new ArrayList<>();
+      for (File child : topChildren) {
+         String name = child.getName();
+         if (child.isDirectory()) {
+            if (shouldSkipDir(name, child)) {
                continue;
             }
-            Source childSource = (source == Source.PROJECT && name.equals("build"))
+            Source childSrc = (source == Source.PROJECT && name.equals("build"))
                     ? Source.GENERATED : source;
-            topTasks.add(new WalkTask(f, normRoot, queue, childSource, exts));
+            tasks.add(WALK_POOL.submit(() -> walkNio(child.toPath(), normRoot, queue, childSrc, exts)));
          } else {
             String ext = getExtension(name);
-            if (!exts.contains(ext)) {
-               continue;
+            if (exts.contains(ext)) {
+               String abs = child.getAbsolutePath().replace('\\', '/');
+               String rel = abs.startsWith(normRoot) ? abs.substring(normRoot.length() + 1) : abs;
+               queue.add(new FileEntry(name, rel, abs, source));
             }
-            String abs = f.getAbsolutePath().replace('\\', '/');
-            String rel = abs.startsWith(normRoot) ? abs.substring(normRoot.length() + 1) : abs;
-            queue.add(new FileEntry(name, rel, abs, source));
          }
       }
 
-      if (!topTasks.isEmpty()) {
-         WALK_POOL.invoke(new RecursiveAction() {
-            @Override
-            protected void compute() {
-               invokeAll(topTasks);
-            }
-         });
+      for (ForkJoinTask<?> t : tasks) {
+         t.join();
       }
-
       result.addAll(queue);
    }
 
-   private static final class WalkTask extends RecursiveAction {
-
-      private final File dir;
-      private final String rootPath;
-      private final ConcurrentLinkedQueue<FileEntry> result;
-      private final Source source;
-      private final Set<String> exts;
-
-      WalkTask(File dir, String rootPath, ConcurrentLinkedQueue<FileEntry> result,
-              Source source, Set<String> exts) {
-         this.dir = dir;
-         this.rootPath = rootPath;
-         this.result = result;
-         this.source = source;
-         this.exts = exts;
-      }
-
-      @Override
-      protected void compute() {
-         walkDir(dir, source);
-      }
-
-      private void walkDir(File startDir, Source startSource) {
-         Deque<File[]> dirStack = new ArrayDeque<>();
-         Deque<Source> srcStack = new ArrayDeque<>();
-         File[] first = startDir.listFiles();
-         if (first == null) {
-            return;
-         }
-         dirStack.push(first);
-         srcStack.push(startSource);
-
-         while (!dirStack.isEmpty()) {
-            File[] children = dirStack.pop();
-            Source curSource = srcStack.pop();
-            for (File f : children) {
-               if (f.isHidden()) {
-                  continue;
+   private static void walkNio(Path startDir, String normRoot,
+           ConcurrentLinkedQueue<FileEntry> result, Source source, Set<String> exts) {
+      try {
+         Files.walkFileTree(startDir, new SimpleFileVisitor<Path>() {
+            @Override
+            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+               if (isHiddenByAttrs(attrs)) {
+                  return FileVisitResult.SKIP_SUBTREE;
                }
-               String name = f.getName();
-               if (f.isDirectory()) {
-                  if (shouldSkipDir(name, f)) {
-                     continue;
-                  }
-                  File[] sub = f.listFiles();
-                  if (sub == null) {
-                     continue;
-                  }
-                  Source childSource = (curSource == Source.PROJECT && name.equals("build"))
-                          ? Source.GENERATED : curSource;
-                  dirStack.push(sub);
-                  srcStack.push(childSource);
-               } else {
-                  String ext = getExtension(name);
-                  if (!exts.contains(ext)) {
-                     continue;
-                  }
-                  String abs = f.getAbsolutePath().replace('\\', '/');
-                  String rel = abs.startsWith(rootPath)
-                          ? abs.substring(rootPath.length() + 1) : abs;
-                  result.add(new FileEntry(name, rel, abs, curSource));
+               String name = dir.getFileName().toString();
+               if (shouldSkipDir(name, dir.toFile())) {
+                  return FileVisitResult.SKIP_SUBTREE;
                }
+               return FileVisitResult.CONTINUE;
             }
-         }
+
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+               if (isHiddenByAttrs(attrs)) {
+                  return FileVisitResult.CONTINUE;
+               }
+               String name = file.getFileName().toString();
+               String ext = getExtension(name);
+               if (!exts.contains(ext)) {
+                  return FileVisitResult.CONTINUE;
+               }
+               String abs = file.toAbsolutePath().toString().replace('\\', '/');
+               String rel = abs.startsWith(normRoot) ? abs.substring(normRoot.length() + 1) : abs;
+               result.add(new FileEntry(name, rel, abs, source));
+               return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult visitFileFailed(Path file, IOException exc) {
+               return FileVisitResult.CONTINUE;
+            }
+         });
+      } catch (IOException ex) {
+         System.err.println("[QuickFileSearch] walkNio failed for " + startDir + ": " + ex);
       }
+   }
+
+   private static boolean isHiddenByAttrs(BasicFileAttributes attrs) {
+      return (attrs instanceof DosFileAttributes) && ((DosFileAttributes) attrs).isHidden();
    }
 
    private static boolean shouldSkipDir(String name, File dir) {

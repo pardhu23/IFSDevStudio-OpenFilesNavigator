@@ -30,7 +30,9 @@ Binary format: 4-byte magic `0xCAFEF11E` + 4-byte version hash (XOR of sorted ex
 The dirty flag for `custCache` is a zero-byte sentinel file `cust_dirty` in the same directory. Written by the file-watcher when an incremental update overflows or on shutdown; checked at the next dialog open.
 
 ### Parallel Walk
-`ForkJoinPool` with `parallelism = min(6, availableProcessors)` walks directory trees. Each `WalkTask` recursively forks sub-directories and collects files matching the configured extension set. Results are merged via `ConcurrentLinkedQueue`.
+`ForkJoinPool` with `parallelism = min(6, availableProcessors)` walks directory trees. The top-level children of each root are enumerated with `File.listFiles()` (O(modules) entries — hundreds, not thousands). Each top-level subdirectory is submitted to the pool as a `ForkJoinTask` running `Files.walkFileTree` with a `SimpleFileVisitor`.
+
+Using NIO `Files.walkFileTree` instead of `File.listFiles()` recursively is critical for performance on Windows: the JDK's `WindowsDirectoryStream` populates `BasicFileAttributes` (including `DosFileAttributes.isHidden()` and `isDirectory()`) directly from the `WIN32_FIND_DATA` structure returned by `FindFirstFile`/`FindNextFile` — zero extra `GetFileAttributes` syscalls per file. The old `File`-based walker called `f.isHidden()` and `f.isDirectory()` separately, each triggering a `GetFileAttributes` call intercepted by antivirus. For 62K files this eliminated ~125K AV-intercepted syscalls, reducing scan time by approximately 2–4x.
 
 ### Query Pipeline
 ```
@@ -66,6 +68,8 @@ Static method called from the `projectListener` in `OpenFilesTopComponent`. Clea
 
 ### File Watcher (`custWatcher`)
 Registered as a `FileChangeListener` on the `workspace/` `FileObject`. Only `custCache` has a watcher; build and core caches rely on full rebuilds because their change patterns are too coarse for incremental tracking. The watcher normalises paths to forward slashes before adding to `custCache`.
+
+**Critical**: `FileObject.addRecursiveListener` on a large workspace (62K+ files) walks the entire directory tree to register OS-level watches. On Windows with antivirus, this takes 40–50 seconds. It must **not** be called on the EDT. Watcher registration is done in a dedicated `"QuickFileSearch-WatcherRegistrar"` background thread, launched from within the EDT callback after `custCache` is assigned and `scheduleMergedRebuild` is queued. This means the UI is responsive immediately after scanning finishes; the file watcher becomes active a short time later.
 
 ### Dialog Singleton
 `QuickFileSearchDialog` is created once per IDE session and reused. `showDialog()` just makes it visible and clears the text field. Caches survive across show/hide cycles.

@@ -94,21 +94,20 @@ Default set covers all standard IFS source types:
 Add or remove extensions at any time — the project cache rebuilds automatically on the next search.
 
 #### Performance & caching
-Three independent caches are held in memory for the entire IDE session and survive dialog close/reopen.
-Indexing starts automatically in the background when the panel opens — **Alt+P is instant on first press**.
+Three independent caches are held in memory for the entire IDE session and survive dialog close/reopen. Indexing runs automatically in the background when the panel opens — the IDE stays fully responsive throughout.
 
 | Cache | Source | Invalidation |
 |-------|--------|-------------|
 | **Project** | `workspace/` files | Incremental: single entry added/removed on file create/delete. No full rebuild unless project changes. |
 | **Build** | `build/` generated files | Debounced: one rebuild fires 3 seconds after IFS code-gen bursts finish, not once per generated file. |
-| **Core** | `checkout/` core files | Rebuilt only when the set of open project core roots changes (project open/close). Switching from one IFS version to another correctly triggers a full core rescan. |
+| **Core** | `checkout/` core files | Rebuilt only when the set of open project core roots changes (project open/close). |
 
-Additional details:
-- Directory walk runs in parallel using a shared `ForkJoinPool` (up to 4 threads)
-- File-system watchers are scoped to `workspace/` and `build/` only — never the full project root, avoiding expensive OS-level watch setup on thousands of directories
-- Any open NetBeans project without a `workspace/` subdirectory (plain Java projects, plugin projects, etc.) is excluded from indexing and watching entirely
-- Multiple projects pointing to the same core checkout are deduplicated — each unique path is walked exactly once
-- Excluded from indexing: `server/` directories directly under any `workspace/<module>/` or `checkout/<module>/` path (lobby, configuration and report related `.xsd`, `.rdl` etc.)
+- **First open**: workspace and core directories are scanned in the background using a parallel directory walker. Quick Search becomes available once scanning completes — typically 2–5 seconds depending on project size.
+- **Subsequent opens**: caches are loaded from a binary disk cache with no directory walk — typically ready in 1–3 seconds.
+- File-system watchers on `workspace/` and `build/` keep the project cache up-to-date incrementally as you work.
+- Projects without a `workspace/` subdirectory are excluded from indexing entirely.
+- Multiple projects pointing to the same core checkout are deduplicated — each path is walked once.
+- `server/` directories inside IFS module folders are excluded from indexing.
 
 ### Git Status Strip
 
