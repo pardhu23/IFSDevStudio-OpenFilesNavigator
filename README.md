@@ -10,17 +10,17 @@ pinning, grouping, color tags, stash/restore, recently-closed history, and IFS-a
 
 List View:
 
-<img width="530" height="497" alt="image" src="https://github.com/user-attachments/assets/f8e03e55-06a5-487a-8a65-5ecdf35ad23a" />
+<img width="457" height="340" alt="image" src="https://github.com/user-attachments/assets/4e7aaf81-d248-498f-b991-448df4d4074e" />
+
 
 Tree View:
 
-<img width="527" height="513" alt="image" src="https://github.com/user-attachments/assets/db6b6df8-11d5-4ef1-b627-26e2afe1a19d" />
+<img width="460" height="327" alt="image" src="https://github.com/user-attachments/assets/ecb50ca5-c232-4546-af72-54c2f3ead82b" />
 
 
 RMB Options:
 
-<img width="535" height="745" alt="image" src="https://github.com/user-attachments/assets/995e1804-eedb-44ed-8332-fb69c31a65c4" />
-
+<img width="461" height="892" alt="image" src="https://github.com/user-attachments/assets/3fdfcc8c-a671-4942-9c0a-46bac3697468" />
 
 ---
 
