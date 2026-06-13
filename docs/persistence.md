@@ -22,7 +22,8 @@ Chosen over custom file I/O because it provides atomic writes, per-user isolatio
   viewMode, noteDisplay, buildGrouping, treeGrouping,
   listSort, closedHistoryLimit, closedStripOpen,
   autoScanOnStartup, indexExtensions, deployOrder,
-  gitPath, gitStripOpen
+  gitPath, gitStripOpen,
+  developerId, customizationId
 
 /com/pardha/openfiles/pins       ← ordered: 0=key, 1=key, …
 /com/pardha/openfiles/notes      ← tcKey → note text

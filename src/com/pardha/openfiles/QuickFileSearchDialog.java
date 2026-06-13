@@ -70,13 +70,23 @@ public final class QuickFileSearchDialog extends JDialog {
       final String relativePath;
       final String absolutePath;
       final Source source;
-      int score;
 
       FileEntry(String name, String relativePath, String absolutePath, Source source) {
          this.name = name;
          this.relativePath = relativePath;
          this.absolutePath = absolutePath;
          this.source = source;
+      }
+   }
+
+   private static final class ScoredEntry {
+
+      final FileEntry entry;
+      final int score;
+
+      ScoredEntry(FileEntry e, int s) {
+         entry = e;
+         score = s;
       }
    }
 
@@ -201,11 +211,11 @@ public final class QuickFileSearchDialog extends JDialog {
     */
    private static javax.swing.Timer mergeDebounceTimer = null;
    /**
-    * Latest onDone callback to fire when mergeDebounceTimer fires.
-    * Stored separately so restarting the timer never drops earlier AtomicInteger
-    * counters (fix for the broken listener-rewiring bug in the old code).
+    * All onDone callbacks accumulated since the last merge fired. Drained and
+    * executed together when the debounce timer fires, so no AtomicInteger
+    * counter is dropped when multiple caches complete within MERGE_DEBOUNCE_MS.
     */
-   private static Runnable pendingMergeCallback = null;
+   private static final List<Runnable> pendingMergeCallbacks = new ArrayList<>();
 
    private static long indexingStartedAt = 0;
 
@@ -841,10 +851,8 @@ public final class QuickFileSearchDialog extends JDialog {
     * Must be called on EDT.
     */
    private static void scheduleMergedRebuild(Runnable extraCallback) {
-      // Store the latest callback — last write wins, which is correct because
-      // the timer restart means an earlier callback would have fired anyway.
       if (extraCallback != null) {
-         pendingMergeCallback = extraCallback;
+         pendingMergeCallbacks.add(extraCallback);
       }
 
       if (mergeDebounceTimer != null) {
@@ -852,12 +860,9 @@ public final class QuickFileSearchDialog extends JDialog {
       } else {
          mergeDebounceTimer = new javax.swing.Timer(MERGE_DEBOUNCE_MS, e -> {
             mergeDebounceTimer = null;
-            doRebuildMergedCache();
-            Runnable cb = pendingMergeCallback;
-            pendingMergeCallback = null;
-            if (cb != null) {
-               cb.run();
-            }
+            List<Runnable> cbs = new ArrayList<>(pendingMergeCallbacks);
+            pendingMergeCallbacks.clear();
+            doRebuildMergedCache(cbs);
          });
          mergeDebounceTimer.setRepeats(false);
          mergeDebounceTimer.start();
@@ -865,42 +870,51 @@ public final class QuickFileSearchDialog extends JDialog {
    }
 
    /**
-    * The actual merge — must be called on EDT.
+    * Spawns a background thread to concatenate the three cache lists (O(N) work
+    * kept off the EDT), then applies the result and fires all pending callbacks
+    * on the EDT once the new mergedCache is in place.
+    *
+    * Must be called on EDT.
     */
-   private static void doRebuildMergedCache() {
-      int cap = (custCache != null ? custCache.size() : 0)
-              + (buildCache != null ? buildCache.size() : 0)
-              + (coreCache != null ? coreCache.size() : 0);
+   private static void doRebuildMergedCache(List<Runnable> callbacks) {
+      final List<FileEntry> snapCust = custCache;
+      final List<FileEntry> snapBuild = buildCache;
+      final List<FileEntry> snapCore = coreCache;
+      final long snapStartedAt = indexingStartedAt;
 
-      List<FileEntry> merged = new ArrayList<>(cap);
-      if (custCache != null) {
-         merged.addAll(custCache);
-      }
-      if (buildCache != null) {
-         merged.addAll(buildCache);
-      }
-      if (coreCache != null) {
-         merged.addAll(coreCache);
-      }
-
-      mergedCache = merged;
-      mergedCacheStale = false;
-
-      if (custCache != null && buildCache != null && coreCache != null) {
-         long elapsed = indexingStartedAt > 0
-                 ? (System.currentTimeMillis() - indexingStartedAt)
-                 : -1;
-         System.err.println("[QuickFileSearch] All caches ready — total: "
-                 + (elapsed >= 0 ? elapsed + "ms" : "n/a (disk cache)") + " | "
-                 + "cust=" + custCache.size()
-                 + " build=" + buildCache.size()
-                 + " core=" + coreCache.size()
-                 + " merged=" + mergedCache.size());
-      }
-
-      if (instance != null && instance.isVisible()) {
-         instance.scheduleQueryUpdate();
-      }
+      new Thread(() -> {
+         List<FileEntry> merged;
+         synchronized (CACHE_LOCK) {
+            int cap = (snapCust != null ? snapCust.size() : 0)
+                    + (snapBuild != null ? snapBuild.size() : 0)
+                    + (snapCore != null ? snapCore.size() : 0);
+            merged = new ArrayList<>(cap);
+            if (snapCust != null) merged.addAll(snapCust);
+            if (snapBuild != null) merged.addAll(snapBuild);
+            if (snapCore != null) merged.addAll(snapCore);
+         }
+         final List<FileEntry> finalMerged = merged;
+         SwingUtilities.invokeLater(() -> {
+            mergedCache = finalMerged;
+            mergedCacheStale = false;
+            if (snapCust != null && snapBuild != null && snapCore != null) {
+               long elapsed = snapStartedAt > 0
+                       ? (System.currentTimeMillis() - snapStartedAt) : -1;
+               System.err.println("[QuickFileSearch] All caches ready — total: "
+                       + (elapsed >= 0 ? elapsed + "ms" : "n/a (disk cache)") + " | "
+                       + "cust=" + snapCust.size()
+                       + " build=" + snapBuild.size()
+                       + " core=" + snapCore.size()
+                       + " merged=" + finalMerged.size());
+            }
+            if (instance != null && instance.isVisible()) {
+               instance.scheduleQueryUpdate();
+            }
+            for (Runnable cb : callbacks) {
+               cb.run();
+            }
+         });
+      }, "QuickFileSearch-MergeBuilder").start();
    }
 
    // =========================================================================
@@ -1630,14 +1644,45 @@ public final class QuickFileSearchDialog extends JDialog {
 
    /**
     * Pure filtering function — no EDT access, safe to run on any thread.
+    * Scores are kept in local ScoredEntry objects so no shared FileEntry field
+    * is mutated. Uses a size-100 min-heap to avoid sorting the full match set.
     */
    private static List<FileEntry> filterAndSort(List<FileEntry> allFiles, String query) {
-      List<FileEntry> matched = new ArrayList<>();
-
       if (query.isEmpty()) {
-         matched.addAll(allFiles);
-         return matched;
+         int cap = Math.min(allFiles.size(), 100);
+         return new ArrayList<>(allFiles.subList(0, cap));
       }
+
+      Comparator<ScoredEntry> comp = (a, b) -> {
+         String lowerA = a.entry.name.toLowerCase(Locale.ROOT);
+         String lowerB = b.entry.name.toLowerCase(Locale.ROOT);
+         String baseA = getBaseName(a.entry.name);
+         String baseB = getBaseName(b.entry.name);
+         String lowerBa = baseA.toLowerCase(Locale.ROOT);
+         String lowerBb = baseB.toLowerCase(Locale.ROOT);
+
+         boolean aExact = lowerA.equals(query), bExact = lowerB.equals(query);
+         if (aExact != bExact) return aExact ? -1 : 1;
+
+         boolean aFP = lowerA.startsWith(query), bFP = lowerB.startsWith(query);
+         if (aFP != bFP) return aFP ? -1 : 1;
+
+         boolean aBP = lowerBa.startsWith(query), bBP = lowerBb.startsWith(query);
+         if (aBP != bBP) return aBP ? -1 : 1;
+
+         int nc = baseA.compareToIgnoreCase(baseB);
+         if (nc != 0) return nc;
+
+         int sc = Integer.compare(b.score, a.score);
+         if (sc != 0) return sc;
+
+         return a.entry.name.compareToIgnoreCase(b.entry.name);
+      };
+
+      // Min-heap ordered worst-first: evicting the heap head when size > 100
+      // keeps only the top 100 without sorting the full match set.
+      java.util.PriorityQueue<ScoredEntry> heap =
+              new java.util.PriorityQueue<>(101, comp.reversed());
 
       for (FileEntry entry : allFiles) {
          String lowerName = entry.name.toLowerCase(Locale.ROOT);
@@ -1660,64 +1705,28 @@ public final class QuickFileSearchDialog extends JDialog {
             tierScore = 10;
          }
 
-         if (matchBase.startsWith(query)) {
-            entry.score = tierScore + 10;
-            matched.add(entry);
-         } else if (matchBase.contains(query)) {
-            entry.score = tierScore;
-            matched.add(entry);
-         } else if (lowerBase.startsWith(query)) {
-            entry.score = tierScore + 10;
-            matched.add(entry);
-         } else if (lowerBase.contains(query)) {
-            entry.score = tierScore;
-            matched.add(entry);
-         } else if (lowerName.startsWith(query)) {
-            entry.score = tierScore + 10;
-            matched.add(entry);
-         } else if (lowerName.contains(query)) {
-            entry.score = tierScore;
-            matched.add(entry);
+         int entryScore;
+         if (matchBase.startsWith(query) || lowerBase.startsWith(query) || lowerName.startsWith(query)) {
+            entryScore = tierScore + 10;
+         } else if (matchBase.contains(query) || lowerBase.contains(query) || lowerName.contains(query)) {
+            entryScore = tierScore;
+         } else {
+            continue;
+         }
+
+         heap.add(new ScoredEntry(entry, entryScore));
+         if (heap.size() > 100) {
+            heap.poll();
          }
       }
 
-      matched.sort((a, b) -> {
-         String baseA = getBaseName(a.name);
-         String baseB = getBaseName(b.name);
-         String lowerA = a.name.toLowerCase(Locale.ROOT);
-         String lowerB = b.name.toLowerCase(Locale.ROOT);
-         String lowerBa = baseA.toLowerCase(Locale.ROOT);
-         String lowerBb = baseB.toLowerCase(Locale.ROOT);
-
-         boolean aExact = lowerA.equals(query), bExact = lowerB.equals(query);
-         if (aExact != bExact) {
-            return aExact ? -1 : 1;
-         }
-
-         boolean aFP = lowerA.startsWith(query), bFP = lowerB.startsWith(query);
-         if (aFP != bFP) {
-            return aFP ? -1 : 1;
-         }
-
-         boolean aBP = lowerBa.startsWith(query), bBP = lowerBb.startsWith(query);
-         if (aBP != bBP) {
-            return aBP ? -1 : 1;
-         }
-
-         int nc = baseA.compareToIgnoreCase(baseB);
-         if (nc != 0) {
-            return nc;
-         }
-
-         int tc = Integer.compare(b.score, a.score);
-         if (tc != 0) {
-            return tc;
-         }
-
-         return a.name.compareToIgnoreCase(b.name);
-      });
-
-      return matched;
+      ScoredEntry[] arr = heap.toArray(new ScoredEntry[0]);
+      java.util.Arrays.sort(arr, comp);
+      List<FileEntry> result = new ArrayList<>(arr.length);
+      for (ScoredEntry se : arr) {
+         result.add(se.entry);
+      }
+      return result;
    }
 
    /**
@@ -1727,11 +1736,8 @@ public final class QuickFileSearchDialog extends JDialog {
     */
    private void applyResults(List<FileEntry> matched, String query,
            int custCount, int buildCount, int coreCount) {
-      int displayCount = Math.min(matched.size(), 100);
-      List<FileEntry> display = matched.subList(0, displayCount);
-
       // Single batch update — one contentsChanged event, one repaint.
-      resultModel.setAll(display);
+      resultModel.setAll(matched);
       if (!resultModel.isEmpty()) {
          resultList.setSelectedIndex(0);
       }

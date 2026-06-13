@@ -2,7 +2,7 @@
 
 ## Purpose and Scope
 
-Three components provide IFS Developer Studio–specific functionality that has no meaning outside of an IFS project: `FindApiFileAction`, `FormatApiNameAction`, and `ModuleDependencyTreePanel`. They rely on IFS naming conventions, project property keys, and (in one case) reflection against loaded IFS classes.
+These components provide IFS Developer Studio–specific functionality that has no meaning outside of an IFS project: `FindApiFileAction`, `FormatApiNameAction`, `ModuleDependencyTreePanel`, and the inline "IFS: Add File Header Comment" action in the Open Files panel. They rely on IFS naming conventions, project property keys, and (in one case) reflection against loaded IFS classes.
 
 ## Key Classes / Files
 
@@ -11,6 +11,9 @@ Three components provide IFS Developer Studio–specific functionality that has 
 | `FindApiFileAction.java` | Converts selected `snake_case_api` text to `PascalCase` and opens Quick Search |
 | `FormatApiNameAction.java` | Reformats selected text to `Snake_Case_API` in-editor |
 | `ModuleDependencyTreePanel.java` | Displays static/dynamic IFS module dependencies via reflection |
+| `OpenFilesTopComponent.java` | `addIfsHeaderComment()` — inline header-comment action (copies to clipboard) |
+| `IfsHeaderCommentAction.java` | Inserts a header comment line at the cursor line in any editor (no dialog) |
+| `IfsInlineCommentAction.java` | Wraps selected lines with `--(+) YYMMDD DevId CustId (START/FINISH)` markers in the editor |
 
 ---
 
@@ -84,6 +87,87 @@ Then opens it via `DataObject` / `OpenCookie`.
 - **Reflection call safety**: All reflection is wrapped in a try-catch. If the IFS class is loaded but the method signature has changed, the panel logs the error to `System.err` and shows the error in the tree rather than propagating a crash.
 - **`openWindow()` static method**: Opens the panel in a standalone `JFrame`. This is intentional — the module dependency panel is a utility tool that should not dock into the main window system.
 - **Module name normalisation**: The panel passes module names to the IFS API in uppercase. The tree displays them as returned by the API (mixed case in some IFS versions).
+
+---
+
+## IFS: Add File Header Comment
+
+### Purpose
+Prepends a correctly-formatted IFS change-history line to any non-generated file open in the panel. Format:
+
+```
+--  260420  PAYEIN XXXXXX: Add source file for C_BC_FREIGHT_SEQ.
+```
+
+(Or `//` prefix for Java / JS / TS / CS / CSS / SCSS files.)
+
+### Configuration
+Developer ID and Customization ID are stored via `PluginPrefs.getDeveloperId()` / `getCustomizationId()` (keys `developerId` / `customizationId` under the root preferences node). Both are set in the Settings dialog (⚙) under the "IFS — header comment identity" section. Values are auto-uppercased on save.
+
+### Activation
+Available as "IFS: Add File Header Comment…" in the right-click (RMB) context menu on any single non-generated file. Disabled for multi-selection and for build/generated files.
+
+### Flow
+1. If Developer ID or Customization ID is blank, a warning dialog is shown pointing to Settings.
+2. A dialog prompts for the description text. A live preview below the field shows the exact line that will be produced, updating as you type.
+3. On OK, the formatted line is copied to the system clipboard. The user pastes it wherever they need it.
+
+### Known Constraint
+The comment prefix (`--` or `//`) is determined by the target file's extension. Unrecognised extensions default to `--`.
+
+---
+
+## IFS: Insert Header Comment
+
+### Purpose
+Inserts a correctly-formatted IFS change-history comment line directly into the editor at the current cursor line — no dialog, no clipboard step. The line ends with `": "` so the user can type the description immediately.
+
+Example output inserted before the cursor line:
+```
+--  260613  PAYEIN XXXXXX: 
+```
+
+### Format
+`<prefix>  <YYMMDD>  <DevId> <CustId>: ` — double spaces around the date, colon+space at end. Prefix is `--` by default; `//` for Java / JS / TS / CS / CSS / SCSS / JSX / TSX files (detected from the file's extension via the document's `StreamDescriptionProperty`).
+
+### Registration
+`IfsHeaderCommentAction` — registered at position 322 in `Editors/Popup`, so it appears in every editor type's right-click menu.
+
+### Behavior
+1. Resolves DevId and CustId from `PluginPrefs`; shows a warning dialog if either is blank.
+2. Detects `--` vs `//` prefix from the open file's extension.
+3. Walks left from the caret to find the start of the current line.
+4. Calls `Document.insertString(lineStart, line + "\n", null)` to push the comment in above the current line.
+5. Moves the caret to the end of the inserted text (after `": "`, before `\n`) so the user can type the description immediately.
+
+---
+
+## IFS: Wrap with (+) inline code comment
+
+### Purpose
+Wraps the selected lines in an open editor with IFS-style start/finish change markers:
+
+```
+--(+) 260613 PAYEIN XXXXX (START)
+   field CConnectPulse {
+      visible = [false];
+   }
+--(+) 260613 PAYEIN XXXXX (FINISH)
+```
+
+### Format
+`--(+) <YYMMDD> <DevId> <CustId> (START)` / `(FINISH)` — 6-digit YYMMDD date, Developer ID and Customization ID both required. Markers are indented to match the indentation of the first selected line.
+
+### Registration
+`IfsInlineCommentAction` — registered at position 324 in `Editors/Popup` (the generic editor popup), so it appears in the right-click menu of every file type. If Developer ID or Customization ID is blank the action shows a warning dialog pointing to Settings.
+
+### Behavior
+1. Gets the selection start and end offsets from the focused editor.
+2. Expands both offsets to full-line boundaries (walks left/right to the nearest `\n`).
+3. Reads leading whitespace from the first line and prepends it to both markers so they align with the code.
+4. Replaces the expanded selection with `indent+startMarker\n<block>\nindent+finishMarker\n` in a single `replaceSelection` call — one undo step.
+
+---
 
 ## Known Gotchas / Constraints
 

@@ -126,6 +126,12 @@ public final class PluginPrefs {
    /** Whether to auto-scan on IDE startup. Default true. */
    private static final String KEY_AUTO_SCAN = "autoScanOnStartup";
 
+   /** IFS developer sign used in file header comments, e.g. "PAYEIN". */
+   private static final String KEY_DEVELOPER_ID = "developerId";
+
+   /** IFS customization ID used in file header comments, e.g. "XXXXXX". */
+   private static final String KEY_CUSTOMIZATION_ID = "customizationId";
+
    /** User-configured path to the git executable. Empty = auto-detect. */
    private static final String KEY_GIT_PATH = "gitPath";
 
@@ -322,6 +328,25 @@ public final class PluginPrefs {
 
    public static void setAutoScanEnabled(boolean enabled) {
       root().putBoolean(KEY_AUTO_SCAN, enabled);
+      flush(root());
+   }
+
+   // ── IFS header comment identity ───────────────────────────────────────
+   public static String getDeveloperId() {
+      return root().get(KEY_DEVELOPER_ID, "");
+   }
+
+   public static void setDeveloperId(String id) {
+      root().put(KEY_DEVELOPER_ID, id == null ? "" : id.trim());
+      flush(root());
+   }
+
+   public static String getCustomizationId() {
+      return root().get(KEY_CUSTOMIZATION_ID, "");
+   }
+
+   public static void setCustomizationId(String id) {
+      root().put(KEY_CUSTOMIZATION_ID, id == null ? "" : id.trim());
       flush(root());
    }
 

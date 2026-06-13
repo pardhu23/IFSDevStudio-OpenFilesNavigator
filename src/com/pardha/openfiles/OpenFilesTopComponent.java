@@ -276,13 +276,13 @@ public final class OpenFilesTopComponent extends TopComponent {
 
       JPanel btnPanel = new JPanel(new WrapLayout(FlowLayout.LEFT, 2, 1));
       btnPanel.setOpaque(false);
+      btnPanel.add(sortBtn);
       btnPanel.add(listBtn);
       btnPanel.add(treeBtn);
       btnPanel.add(quickSearchBtn);
       btnPanel.add(stashBtn);
-      btnPanel.add(settingsBtn);
       btnPanel.add(depTreeBtn);
-      btnPanel.add(sortBtn);
+      btnPanel.add(settingsBtn);
       northPanel.add(btnPanel, BorderLayout.NORTH);
 
       searchField.setToolTipText("Fuzzy filter files (Esc to clear)");
@@ -331,7 +331,11 @@ public final class OpenFilesTopComponent extends TopComponent {
       mainSplit.setResizeWeight(1.0);
       mainSplit.setContinuousLayout(true);
       add(mainSplit, BorderLayout.CENTER);
-      add(closedStripWrapper, BorderLayout.SOUTH);
+
+      JPanel bottomPanel = new JPanel(new BorderLayout());
+      bottomPanel.add(closedStripWrapper, BorderLayout.NORTH);
+      bottomPanel.add(buildCustIdStrip(), BorderLayout.SOUTH);
+      add(bottomPanel, BorderLayout.SOUTH);
 
       CardLayout cl = (CardLayout) centerPanel.getLayout();
       cl.show(centerPanel, viewMode == ViewMode.TREE ? CARD_TREE : CARD_LIST);
@@ -569,6 +573,52 @@ public final class OpenFilesTopComponent extends TopComponent {
    }
 
    // =========================================================================
+   // Customization ID strip — always-visible, inline-editable
+   // =========================================================================
+   private JPanel buildCustIdStrip() {
+      Color sepColor = UIManager.getColor("Separator.foreground");
+      if (sepColor == null) {
+         sepColor = new Color(180, 180, 180);
+      }
+
+      JPanel strip = new JPanel(new BorderLayout(6, 0));
+      strip.setOpaque(true);
+      Color bg = UIManager.getColor("Panel.background");
+      if (bg == null) {
+         bg = new Color(240, 240, 240);
+      }
+      strip.setBackground(blend(bg, new Color(128, 128, 128), 0.04f));
+      strip.setBorder(BorderFactory.createCompoundBorder(
+              BorderFactory.createMatteBorder(1, 0, 0, 0, sepColor),
+              new EmptyBorder(2, 8, 2, 8)));
+      strip.setPreferredSize(new Dimension(0, 24));
+
+      JLabel lbl = new JLabel("Cust ID:");
+      lbl.setFont(lbl.getFont().deriveFont(Font.BOLD, 11f));
+      strip.add(lbl, BorderLayout.WEST);
+
+      JTextField field = new JTextField(PluginPrefs.getCustomizationId());
+      field.setFont(field.getFont().deriveFont(11f));
+      field.setBorder(BorderFactory.createEmptyBorder(1, 4, 1, 4));
+      field.setOpaque(false);
+      field.setToolTipText("IFS Customization ID used in file header comments — edits save instantly");
+
+      Runnable save = () -> {
+         PluginPrefs.setCustomizationId(field.getText());
+         field.setText(PluginPrefs.getCustomizationId());
+      };
+      field.addActionListener(e -> save.run());
+      field.addFocusListener(new java.awt.event.FocusAdapter() {
+         @Override
+         public void focusLost(java.awt.event.FocusEvent e) {
+            save.run();
+         }
+      });
+
+      strip.add(field, BorderLayout.CENTER);
+      return strip;
+   }
+
    // Recently-closed strip
    // =========================================================================
    private void setupClosedStrip() {
@@ -1085,6 +1135,19 @@ public final class OpenFilesTopComponent extends TopComponent {
       content.add(deployHint);
       content.add(Box.createVerticalStrut(10));
 
+      // ── IFS header comment identity ───────────────────────────────────────
+      addSectionLabel(content, "IFS — Developer ID:");
+      JPanel ifsIdRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+      ifsIdRow.setOpaque(false);
+      ifsIdRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+      JTextField devIdField = new JTextField(PluginPrefs.getDeveloperId(), 12);
+      ifsIdRow.add(devIdField);
+      ifsIdRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, ifsIdRow.getPreferredSize().height));
+      content.add(ifsIdRow);
+      content.add(Box.createVerticalStrut(2));
+      content.add(hint("Developer sign used in header comments, e.g. PAYEIN  (Customization ID is the strip at the bottom of the panel)"));
+      content.add(Box.createVerticalStrut(10));
+
       // ── Git executable path ───────────────────────────────────────────────
       addSectionLabel(content, "Git — executable path:");
       JTextField gitPathField = new JTextField(PluginPrefs.getGitPath());
@@ -1220,6 +1283,7 @@ public final class OpenFilesTopComponent extends TopComponent {
          }
          PluginPrefs.setAutoScanEnabled(autoScanCb.isSelected());
          PluginPrefs.setGitPath(gitPathField.getText().trim());
+         PluginPrefs.setDeveloperId(devIdField.getText().trim());
          dlg.dispose();
       });
       cancel.addActionListener(ev -> dlg.dispose());
@@ -1420,6 +1484,13 @@ public final class OpenFilesTopComponent extends TopComponent {
          genDeployDep.addActionListener(e
                  -> runActionOnEDT(CAT_PLSQL_TOOLBAR, ACT_GENERATE_DEPLOY_DEPENDENTS, nonBuildTargets));
          menu.add(genDeployDep);
+
+         if (single && nonBuildTargets.size() == 1) {
+            menu.addSeparator();
+            JMenuItem headerComment = new JMenuItem("IFS: Copy Header Comment");
+            headerComment.addActionListener(e -> addIfsHeaderComment(nonBuildTargets.get(0)));
+            menu.add(headerComment);
+         }
       }
 
       menu.addSeparator();
@@ -2550,6 +2621,69 @@ public final class OpenFilesTopComponent extends TopComponent {
       System.err.println("[OpenFilesNavigator] CustomizeThis: no model file found for "
               + fo.getNameExt() + " (tried: " + java.util.Arrays.toString(targetExts) + ")");
       return null;
+   }
+
+   // =========================================================================
+   // IFS: Add File Header Comment
+   // =========================================================================
+   private void addIfsHeaderComment(TopComponent tc) {
+      String devId = PluginPrefs.getDeveloperId();
+      String custId = PluginPrefs.getCustomizationId();
+      if (devId.isEmpty() || custId.isEmpty()) {
+         JOptionPane.showMessageDialog(this,
+                 "Set Developer ID and Customization ID in Settings (⚙) before using this action.",
+                 "IFS: Copy Header Comment", JOptionPane.WARNING_MESSAGE);
+         return;
+      }
+
+      String ext = resolveExtension(tc);
+      boolean javaStyle = "java".equals(ext) || "entity".equals(ext) || "utility".equals(ext) || "enumeration".equals(ext);
+      String prefix = javaStyle ? "//" : "--";
+
+      String date = java.time.LocalDate.now()
+              .format(java.time.format.DateTimeFormatter.ofPattern("yyMMdd"));
+
+      JTextField descField = new JTextField(50);
+      JLabel previewLabel = new JLabel(
+              buildPreviewHtml(prefix, date, devId, custId, ""));
+
+      descField.getDocument().addDocumentListener(new DocumentListener() {
+         private void update() {
+            previewLabel.setText(
+                    buildPreviewHtml(prefix, date, devId, custId, descField.getText().trim()));
+         }
+         @Override public void insertUpdate(DocumentEvent e) { update(); }
+         @Override public void removeUpdate(DocumentEvent e) { update(); }
+         @Override public void changedUpdate(DocumentEvent e) { update(); }
+      });
+
+      JPanel p = new JPanel(new BorderLayout(4, 6));
+      p.add(new JLabel("Description:"), BorderLayout.NORTH);
+      p.add(descField, BorderLayout.CENTER);
+      p.add(previewLabel, BorderLayout.SOUTH);
+
+      int res = JOptionPane.showConfirmDialog(this, p,
+              "IFS: Copy Header Comment", JOptionPane.OK_CANCEL_OPTION,
+              JOptionPane.PLAIN_MESSAGE);
+      if (res != JOptionPane.OK_OPTION) {
+         return;
+      }
+      String description = descField.getText().trim();
+      if (description.isEmpty()) {
+         return;
+      }
+
+      String newLine = prefix + "  " + date + "  " + devId + " " + custId + ": " + description;
+      java.awt.datatransfer.StringSelection sel =
+              new java.awt.datatransfer.StringSelection(newLine);
+      java.awt.Toolkit.getDefaultToolkit().getSystemClipboard().setContents(sel, sel);
+   }
+
+   private static String buildPreviewHtml(String prefix, String date,
+           String devId, String custId, String desc) {
+      String text = prefix + "  " + date + "  " + devId + " " + custId + ": "
+              + (desc.isEmpty() ? "<description>" : desc);
+      return "<html><font color='gray'>" + escapeHtml(text) + "</font></html>";
    }
 
    private void runCustomizeThis(TopComponent tc) {

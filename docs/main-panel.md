@@ -74,6 +74,16 @@ A `TopComponent` is treated as an editor file if it is in an `"editor"` or `"mul
 ### Group collapse state storage
 Collapse state is stored per named section in `PluginPrefs` (node `/com/pardha/openfiles/collapsedGroups`). Section names that contain non-ASCII chars (e.g. `📌 Pinned`) are sanitised by `sanitiseKey()` before being used as preference keys because the Preferences API limits key characters on some platforms.
 
+### Settings dialog
+The settings dialog (`openSettingsDialog()`) is a modal `JDialog` built with a `BoxLayout` vertical panel. Sections, top to bottom:
+- Quick Search indexed file extensions (CSV)
+- Note display / Tree grouping / Generated files / List sort (2-column grid)
+- Generate & Deploy extension order
+- **IFS header comment identity** — two `JTextField`s for Developer ID and Customization ID, persisted via `PluginPrefs.setDeveloperId` / `setCustomizationId`
+- Git executable path
+- Recently-closed limit spinner + Auto-scan checkbox
+- Manage groups (list + add/rename/delete)
+
 ### IFS "Generate / Deploy" actions
 `runIfsAction()` resolves IFS-specific action IDs at runtime via `Actions.forID()` and wraps them as `ContextAwareAction` with a lookup built from the selected `TopComponent`s. This avoids a hard compile-time dependency on IFS modules. If the action is absent (non-IFS IDE), the menu item is simply absent.
 

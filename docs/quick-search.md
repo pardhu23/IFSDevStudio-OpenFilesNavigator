@@ -22,7 +22,7 @@
 | `buildCache` | `<project>/build/` | Debounced 3 000 ms after any file-change event (IFS code-gen creates many files in a burst) |
 | `coreCache` | Path from `project.ccs.corefiles` property | Rebuilt when the set of open projects changes |
 
-All three caches are `List<String[]>` where each entry is `[absolutePath, lowerCaseName, displayLabel]`. Merged via `mergedCache` (a snapshot built on the EDT under `CACHE_LOCK`).
+All three caches are `List<FileEntry>` where each entry holds `name`, `relativePath`, `absolutePath`, and `source`. Merged via `mergedCache`: when any cache completes, `scheduleMergedRebuild` starts a 150 ms debounce timer; on fire, a `QuickFileSearch-MergeBuilder` background thread concatenates the three lists under `CACHE_LOCK`, then hands the result back to the EDT via `invokeLater`.
 
 ### Disk Cache (custCache and coreCache only)
 Binary format: 4-byte magic `0xCAFEF11E` + 4-byte version hash (XOR of sorted extension hashes) + UTF-8 entries. On load, both values are validated; any mismatch triggers a full rebuild. Cache files live in `System.getProperty("user.home")/.openfilesnavigator/`.
@@ -46,9 +46,12 @@ User keystroke
 
 ### Ranking
 `filterAndSort()` produces at most 100 results, ordered by:
-1. Exact filename match (score = `Integer.MAX_VALUE`)
-2. `FuzzyMatcher.score()` — higher is better
-3. Tier penalty: `custCache` variants slightly out-rank `buildCache` generated variants which out-rank `coreCache` entries; tunable via `TIER_*` constants
+1. Exact filename match
+2. Filename / base-name prefix match
+3. Tier score: `-cust` variants (1010) > plain PROJECT files (510) > `-base` variants (20) > GENERATED files (11); `+10` for prefix within tier
+4. Base name alphabetically, then name alphabetically within the same tier/prefix bucket
+
+Scores are computed into a local `ScoredEntry` wrapper — `FileEntry` objects in the shared cache are never mutated. A size-100 min-heap keeps only the top 100 matches during the scan, avoiding a full sort of the complete match set.
 
 ## Non-Obvious Implementation Details
 
@@ -69,20 +72,20 @@ Registered as a `FileChangeListener` on the `workspace/` `FileObject`. Only `cus
 
 ## FuzzyMatcher
 
-`FuzzyMatcher.matches(pattern, text)` is a standard in-order character scan: every character of `pattern` must appear in `text` in order, but gaps are allowed. Returns `false` immediately on any missing character.
+`FuzzyMatcher.matches(pattern, text)` is a standard in-order character scan: every character of `pattern` must appear in `text` in order, but gaps are allowed. Returns `false` immediately on any missing character. Used in `OpenFilesTopComponent` for the panel's inline filter.
 
 `FuzzyMatcher.score(pattern, text)` returns an `int` used for ranking:
-- **+10** per consecutive matched character (run bonus)
-- **+5** if the first match is at position 0 (prefix bonus)
-- **−1** per gap character (gap penalty)
-- Full substring match with no gaps scores highest for a given length
+- **+100** prefix bonus (text starts with query)
+- **+50** substring bonus (text contains query)
+- **+2** per consecutive matched character, **+1** per non-consecutive match
+- **−1** per gap character skipped between matches
 
-Performance target: ≤ 0.05 ms per file (measured ~25 ms total for 500 files on EDT). Do not add allocation inside the score loop.
+`filterAndSort` in `QuickFileSearchDialog` uses its own substring/prefix logic with tier scores rather than `FuzzyMatcher.score()`. Do not add allocation inside the score loop.
 
 ## Known Gotchas / Constraints
 
-- **`CACHE_LOCK`** is a `ReentrantLock`, not `synchronized`. All reads and writes to `custCache`, `buildCache`, `coreCache`, and `mergedCache` must acquire it. Forgetting the lock causes data races that are hard to reproduce under low concurrency.
+- **`CACHE_LOCK`** is a plain `Object` used with `synchronized` blocks (not `ReentrantLock`). It guards incremental `custCache` mutations from watcher callbacks and is also acquired by the `QuickFileSearch-MergeBuilder` thread while it copies the three lists into the new `mergedCache`. Forgetting the lock causes data races that are hard to reproduce under low concurrency.
 - **`buildCache` debounce (3 000 ms)** is intentionally longer than `custCache` because IFS code generation emits dozens of files in a short burst. Lowering this can cause repeated full-rebuilds mid-generation.
 - The disk cache stores **absolute paths**. Moving the project directory invalidates both `custCache` and `coreCache` on disk, triggering a full rebuild on next open — this is correct and intended.
 - **`indexingEverStarted` flag**: set to `true` after the first cache build completes. The dialog checks this flag before deciding whether to show a "Scanning…" placeholder. Do not reset it without also flushing all caches.
-- The `100-result cap` in `filterAndSort` is a display limit, not a correctness limit. All matching files are scored; only the top 100 are returned. Raising it degrades EDT repaint performance noticeably above ~300.
+- The `100-result cap` is enforced inside `filterAndSort` via the min-heap, not in the caller. For empty queries the first 100 entries of `mergedCache` are returned directly. Raising the cap degrades EDT repaint performance noticeably above ~300.

@@ -33,13 +33,25 @@ RMB Options:
 - **User groups** — organize files into named collapsible sections; rename, delete, and reorder groups from the Settings dialog
 - **Color tags** — Red / Orange / Green / Blue / Purple for visual status; shown as a stripe in list view and a dot in tree view
 - **Notes** — attach a short note to any file; configurable display as tooltip, inline `✎` indicator, or subtitle row below the filename
-- **Sort** (`⇅` toolbar button) — four sort modes: **Name A→Z**, **Open order**, **Recently activated** (re-ranks live as you switch files), **File type** (grouped by extension)
+- **Sort** (`⇅` toolbar button, leftmost) — four sort modes: **Name A→Z**, **Open order**, **Recently activated** (re-ranks live as you switch files), **File type** (grouped by extension)
 - **Recently Closed** — reopen accidentally closed files; auto-expands on close, auto-collapses after 5 seconds; history size configurable (1–20)
 - **IFS actions** — Generate Code, Generate & Deploy, Generate & Deploy with Dependents, Execute PL/SQL — triggered directly from the panel context menu
 - **Ordered multi-file deploy** — when deploying multiple files, they are processed sequentially in a configurable extension order (e.g. `.cre` → `.api` → `.plsql`); same order applies to Execute PL/SQL on multiple build files
 - **Customize This** — right-click a core file to create a `-Cust` customisation layer directly from the panel
 - **Build file detection** — generated files (paths containing `/build/`) shown italic in slate-blue; optionally grouped under a separate "Generated" section
 - **Close button** — × button on every file row in both list and tree views
+
+#### Toolbar order (left → right)
+`⇅ Sort` · `≡ List` · `⊞ Tree` · `🔍 Search` · `🗃 Stash` · `Module Links` · `⚙ Settings`
+
+### Customization ID Strip
+
+An always-visible inline-editable strip pinned at the very bottom of the panel, below the Recently Closed section.
+
+- Shows the current **Customization ID** at all times
+- Edit in place and press **Enter** or click away — saves instantly to preferences
+- Value is preserved exactly as typed (no case conversion)
+- Used automatically by the IFS comment actions below
 
 ### Quick File Search (`Alt+P` / `Ctrl+P`)
 Press **Alt+P** or **Ctrl+P** anywhere in IFS Developer Studio to open a floating search popup.  
@@ -169,6 +181,62 @@ Resolution order:
 
 If neither file is found, a dialog lists the paths that were checked.
 
+### IFS Developer Identity
+
+Developer ID and Customization ID are stored in the plugin's preferences and used by all IFS comment actions.
+
+| Field | Where to set | Behaviour |
+|-------|-------------|-----------|
+| **Developer ID** | Settings dialog → *IFS — header comment identity* | Saved as typed; used in all generated comment lines |
+| **Customization ID** | Bottom strip in the panel | Always visible; edit inline and press Enter or click away to save instantly |
+
+Both fields are stored as typed — no uppercase conversion is applied.
+
+---
+
+### IFS Comment Actions
+
+#### IFS: Insert Header Comment *(editor right-click — all file types)*
+
+Inserts a correctly-formatted IFS change-history comment line directly at the cursor line in the editor. No dialog is shown. The line ends with `": "` so you can type the description immediately.
+
+```
+--  260613  PAYEIN TEST_CRIM1: 
+```
+
+- Prefix is `//` for `.java`, `.entity`, `.utility`, `.enumeration` files; `--` for everything else
+- Caret is placed after the colon+space — start typing the description
+- Registered in **Editors/Popup** so it appears in every file type's right-click menu (position 322)
+- If Developer ID or Customization ID is blank, a warning dialog is shown pointing to Settings
+
+#### IFS: Copy Header Comment *(panel right-click — single non-generated files)*
+
+Opens a small dialog with a description field and a live preview. On **OK**, copies the formatted header comment line to the clipboard — paste it wherever you need it.
+
+```
+--  260613  PAYEIN TEST_CRIM1: Add source file for C_BC_FREIGHT_SEQ.
+```
+
+#### IFS: Wrap with (+) inline code comment *(editor right-click — all file types)*
+
+Wraps the selected lines in the editor with IFS-style `(+)` start/finish change markers. The markers are indented to match the first line of the selection.
+
+```
+   --(+) 260613 PAYEIN TEST_CRIM1 (START)
+   field Test {
+      visible = [false];
+   }
+   --(+) 260613 PAYEIN TEST_CRIM1 (FINISH)
+```
+
+- Select one or more lines, then right-click → **IFS: Wrap with (+) inline code comment**
+- Selection is automatically expanded to full-line boundaries
+- The wrap is a single undo step
+- Registered in **Editors/Popup** at position 324 — available in all file types
+- If Developer ID or Customization ID is blank, a warning dialog is shown
+
+---
+
 #### Find File from editor (RMB)
 Right-click selected text in any PL/SQL or PLSVC file to access two actions:
 
@@ -200,6 +268,9 @@ Open via the ⚙ button in the Open Files panel toolbar.
 | **Recently closed history** | 1–20 files | How many recently closed files to remember |
 | **Manage groups** | Add / Rename / Delete | Create and manage named file groups |
 | **Git executable** | Path string | Override the `git` executable path if it is not on the system `PATH` |
+| **Developer ID** | Free text | Your IFS developer ID used in all generated comment lines (e.g. `PAYEIN`) |
+
+> **Customization ID** is not in the Settings dialog — set it in the always-visible strip at the bottom of the panel.
 
 ---
 
@@ -219,6 +290,8 @@ OpenFilesNavigator/
 │   ├── QuickFileSearchAction.java      # Action binding for Alt+P / Ctrl+P
 │   ├── FindApiFileAction.java          # RMB "Find File" in PL/SQL editors
 │   ├── FormatApiNameAction.java        # RMB "Format API Name" in PL/SQL editors
+│   ├── IfsHeaderCommentAction.java     # Editor RMB "IFS: Insert Header Comment" (all file types)
+│   ├── IfsInlineCommentAction.java     # Editor RMB "IFS: Wrap with (+) inline code comment" (all file types)
 │   ├── layer.xml                       # NetBeans layer registration
 │   └── Bundle.properties               # Localisation strings
 ├── nbproject/
